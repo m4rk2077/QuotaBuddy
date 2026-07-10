@@ -2,6 +2,8 @@
 
 Windows-first local usage monitor. Tauri 2 shell, React panel, Rust core.
 
+Native backdrop and tray-positioning decisions: [Windows shell](docs/windows-shell.md).
+
 ## Foundation scope
 
 This foundation starts in the notification area and keeps the window available through the tray menu or a left-click. Closing the panel hides it; **Quit** explicitly exits the app.

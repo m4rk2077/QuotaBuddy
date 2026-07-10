@@ -2623,6 +2623,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-notification",
+ "windows",
+ "windows-version",
 ]
 
 [[package]]

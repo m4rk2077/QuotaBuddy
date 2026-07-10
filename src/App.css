@@ -1,12 +1,13 @@
 :root {
   color: #f4f7fb;
-  background: #111827;
+  --panel-background: #111827;
+  background: var(--panel-background);
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
 
-:root[data-theme="light"] { color: #182235; background: #f7f9fc; }
+:root[data-theme="light"] { color: #182235; --panel-background: #f7f9fc; }
 :root[data-theme="light"] .snapshot-card, :root[data-theme="light"] .empty-state, :root[data-theme="light"] .settings { background: #fff; border-color: #cbd5e1; box-shadow: 0 12px 28px #33415518; }
 :root[data-theme="light"] .subtitle, :root[data-theme="light"] .metric span, :root[data-theme="light"] .reset, :root[data-theme="light"] .notice, :root[data-theme="light"] .unavailable { color: #475569; }
 :root[data-theme="light"] .metric strong { color: #182235; }
@@ -14,6 +15,13 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button { font: inherit; }
+
+:root[data-backdrop="desktop-acrylic"] { background: rgb(17 24 39 / 72%); }
+:root[data-backdrop="desktop-acrylic"][data-theme="light"] { background: rgb(247 249 252 / 72%); }
+
+@media (forced-colors: active), (prefers-reduced-transparency: reduce) {
+  :root[data-backdrop="desktop-acrylic"] { background: var(--panel-background); }
+}
 
 .app-shell { max-width: 1120px; margin: 0 auto; padding: 56px 32px; }
 .app-header { display: flex; gap: 24px; justify-content: space-between; align-items: start; margin-bottom: 40px; }

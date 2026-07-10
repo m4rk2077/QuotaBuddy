@@ -3,7 +3,9 @@ mod core;
 mod detection;
 mod diagnostics;
 mod monitor_controls;
+mod popup_position;
 mod spend;
+mod windows_backdrop;
 
 use std::{fs, sync::Mutex, thread, time::Duration};
 
@@ -15,7 +17,7 @@ use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Manager, PhysicalPosition, PhysicalSize, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_notification::NotificationExt;
@@ -75,6 +77,8 @@ struct AppState {
     codex_cache: Mutex<codex::SnapshotCache>,
     preferences: Mutex<MonitorPreferences>,
     alerts: Mutex<AlertTracker>,
+    backdrop: Mutex<windows_backdrop::BackdropMode>,
+    last_tray_rect: Mutex<Option<popup_position::PhysicalRect>>,
 }
 
 fn preferences_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -226,11 +230,125 @@ fn export_redacted_diagnostics(app: tauri::AppHandle) -> Result<String, String> 
     Ok(destination.display().to_string())
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+#[tauri::command]
+fn get_window_backdrop(state: tauri::State<'_, AppState>) -> windows_backdrop::BackdropMode {
+    state.backdrop.lock().map(|mode| *mode).unwrap_or_default()
+}
+
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn remember_tray_rect(app: &tauri::AppHandle, rect: tauri::Rect) -> popup_position::PhysicalRect {
+    // Tauri's tray events are documented and emitted in physical coordinates.
+    let position = rect.position.to_physical::<i32>(1.0);
+    let size = rect.size.to_physical::<u32>(1.0);
+    let rect = popup_position::PhysicalRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    };
+    if let Ok(mut stored) = app.state::<AppState>().last_tray_rect.lock() {
+        *stored = Some(rect);
+    }
+    rect
+}
+
+fn last_tray_rect(app: &tauri::AppHandle) -> Option<popup_position::PhysicalRect> {
+    app.state::<AppState>()
+        .last_tray_rect
+        .lock()
+        .ok()
+        .and_then(|rect| *rect)
+}
+
+fn apply_window_backdrop(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let mode = windows_backdrop::apply_to_window(window);
+    if let Ok(mut stored) = app.state::<AppState>().backdrop.lock() {
+        *stored = mode;
+    }
+    let mode_name = match mode {
+        windows_backdrop::BackdropMode::DesktopAcrylic => "desktop-acrylic",
+        windows_backdrop::BackdropMode::Solid => "solid",
+    };
+    let _ = window.eval(format!(
+        "document.documentElement.dataset.backdrop = '{mode_name}'"
+    ));
+}
+
+fn position_main_window(
+    window: &tauri::WebviewWindow,
+    tray_rect: popup_position::PhysicalRect,
+) -> Result<(), String> {
+    let center_x = tray_rect.x + tray_rect.width as i32 / 2;
+    let center_y = tray_rect.y + tray_rect.height as i32 / 2;
+    let monitor = window
+        .monitor_from_point(f64::from(center_x), f64::from(center_y))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "No monitor contains the tray icon.".to_owned())?;
+    let monitor_rect = popup_position::PhysicalRect {
+        x: monitor.position().x,
+        y: monitor.position().y,
+        width: monitor.size().width,
+        height: monitor.size().height,
+    };
+    let work_area = monitor.work_area();
+    let work_rect = popup_position::PhysicalRect {
+        x: work_area.position.x,
+        y: work_area.position.y,
+        width: work_area.size.width,
+        height: work_area.size.height,
+    };
+    let current_scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let current_size = window
+        .inner_size()
+        .map_err(|error| error.to_string())?
+        .to_logical::<f64>(current_scale);
+    let panel_size_dip = (
+        current_size.width.round() as u32,
+        current_size.height.round() as u32,
+    );
+    let scale_factor = monitor.scale_factor();
+    let popup_size = popup_position::popup_size_physical(panel_size_dip, scale_factor);
+    let ideal = popup_position::calculate_popup_position(
+        monitor_rect,
+        work_rect,
+        tray_rect,
+        panel_size_dip,
+        scale_factor,
+    );
+    let position = popup_position::adjust_with_windows(ideal, tray_rect, popup_size);
+    window
+        .set_size(PhysicalSize::new(popup_size.0, popup_size.1))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_position(PhysicalPosition::new(position.x, position.y))
+        .map_err(|error| error.to_string())
+}
+
+fn show_main_window(app: &tauri::AppHandle, tray_rect: Option<popup_position::PhysicalRect>) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Some(rect) = tray_rect.or_else(|| last_tray_rect(app)) {
+            let _ = position_main_window(&window, rect);
+        }
+        apply_window_backdrop(app, &window);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+fn toggle_main_window(app: &tauri::AppHandle, tray_rect: popup_position::PhysicalRect) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            show_main_window(app, Some(tray_rect));
+        }
     }
 }
 
@@ -241,6 +359,8 @@ pub fn run() {
             codex_cache: Mutex::new(codex::SnapshotCache::default()),
             preferences: Mutex::new(MonitorPreferences::default()),
             alerts: Mutex::new(AlertTracker::default()),
+            backdrop: Mutex::new(windows_backdrop::BackdropMode::Solid),
+            last_tray_rect: Mutex::new(None),
         })
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -249,6 +369,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let preferences = load_preferences(app.handle());
+            if let Some(window) = app.get_webview_window("main") {
+                apply_window_backdrop(app.handle(), &window);
+            }
             if preferences.start_with_windows {
                 let _ = app.autolaunch().enable();
             }
@@ -270,19 +393,24 @@ pub fn run() {
             let _tray = TrayIconBuilder::with_id("quotabuddy-tray")
                 .tooltip("QuotaBuddy — local usage monitor")
                 .menu(&menu)
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => show_main_window(app),
+                    "open" => show_main_window(app, None),
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
+                        rect,
+                        button,
+                        button_state,
                         ..
                     } = event
                     {
-                        show_main_window(tray.app_handle());
+                        let rect = remember_tray_rect(tray.app_handle(), rect);
+                        if button == MouseButton::Left && button_state == MouseButtonState::Up {
+                            toggle_main_window(tray.app_handle(), rect);
+                        }
                     }
                 })
                 .build(app)?;
@@ -294,13 +422,19 @@ pub fn run() {
             get_monitor_preferences,
             save_monitor_preferences,
             get_local_spend_estimate,
-            export_redacted_diagnostics
+            export_redacted_diagnostics,
+            get_window_backdrop,
+            hide_main_window
         ])
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            WindowEvent::Focused(false) => {
+                let _ = window.hide();
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running QuotaBuddy");
