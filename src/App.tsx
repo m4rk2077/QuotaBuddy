@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import type { UsageSnapshot } from "./contracts";
 import { shouldShowEmptyState } from "./panel-state";
@@ -78,6 +79,17 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = preferences.theme;
   }, [preferences.theme]);
+
+  useEffect(() => {
+    void invoke<"desktop-acrylic" | "solid">("get_window_backdrop")
+      .then((mode) => { document.documentElement.dataset.backdrop = mode; })
+      .catch(() => { document.documentElement.dataset.backdrop = "solid"; });
+    const hideOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") void invoke("hide_main_window");
+    };
+    window.addEventListener("keydown", hideOnEscape);
+    return () => window.removeEventListener("keydown", hideOnEscape);
+  }, []);
 
   const updatePreferences = async (next: MonitorPreferences) => {
     setPreferences(next);
