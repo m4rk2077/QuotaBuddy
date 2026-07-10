@@ -5,6 +5,7 @@ mod diagnostics;
 mod monitor_controls;
 mod popup_position;
 mod spend;
+mod tray_presentation;
 mod windows_backdrop;
 
 use std::{fs, sync::Mutex, thread, time::Duration};
@@ -21,6 +22,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_notification::NotificationExt;
+use tray_presentation::{build_tray_presentation, TrayPresentationTracker};
 
 #[tauri::command]
 fn get_usage_snapshots(app: tauri::AppHandle) -> Vec<UsageSnapshot> {
@@ -46,7 +48,7 @@ fn refresh_usage(app: &tauri::AppHandle) -> Vec<UsageSnapshot> {
         .lock()
         .map(|value| value.clone())
         .unwrap_or_default();
-    update_tray_tooltip(app, &snapshots, &preferences);
+    update_tray_presentation(app, &snapshots, &preferences);
     if let Ok(mut tracker) = state.alerts.lock() {
         for snapshot in &snapshots {
             for (label, threshold) in
@@ -79,6 +81,7 @@ struct AppState {
     alerts: Mutex<AlertTracker>,
     backdrop: Mutex<windows_backdrop::BackdropMode>,
     last_tray_rect: Mutex<Option<popup_position::PhysicalRect>>,
+    tray_presentation: Mutex<TrayPresentationTracker>,
 }
 
 fn preferences_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -115,53 +118,27 @@ fn save_preferences(
     fs::write(path, serialized).map_err(|error| error.to_string())
 }
 
-fn update_tray_tooltip(
+fn update_tray_presentation(
     app: &tauri::AppHandle,
     snapshots: &[UsageSnapshot],
     preferences: &MonitorPreferences,
 ) {
-    let Some(snapshot) = snapshots
-        .iter()
-        .find(|snapshot| snapshot.provider == ProviderId::Codex)
+    let next = build_tray_presentation(snapshots, preferences);
+    let Some(presentation) = app
+        .state::<AppState>()
+        .tray_presentation
+        .lock()
+        .ok()
+        .and_then(|mut tracker| tracker.take_changed(next))
     else {
         return;
     };
-    let labels: Vec<_> = preferences
-        .pinned_metrics
-        .iter()
-        .filter_map(|kind| snapshot.metrics.iter().find(|metric| metric.kind == *kind))
-        .filter_map(|metric| {
-            metric.remaining.as_deref().map(|remaining| {
-                format!(
-                    "{}: {remaining}",
-                    localized_metric_label(preferences, metric.kind)
-                )
-            })
-        })
-        .collect();
-    if let Some(tray) = app.tray_by_id("quotabuddy-tray") {
-        let tooltip = if labels.is_empty() {
-            match preferences.language {
-                monitor_controls::Language::En => "QuotaBuddy — local usage monitor".to_owned(),
-                monitor_controls::Language::PtBr => "QuotaBuddy — monitor local de uso".to_owned(),
-            }
-        } else {
-            format!("QuotaBuddy — {}", labels.join(" | "))
-        };
-        let _ = tray.set_tooltip(Some(&tooltip));
-    }
-}
 
-fn localized_metric_label(
-    preferences: &MonitorPreferences,
-    kind: core::MetricKind,
-) -> &'static str {
-    match (preferences.language, kind) {
-        (monitor_controls::Language::PtBr, core::MetricKind::Session) => "Limite de sessão",
-        (monitor_controls::Language::PtBr, core::MetricKind::Cycle) => "Limite mais longo",
-        (_, core::MetricKind::Session) => "Session limit",
-        (_, core::MetricKind::Cycle) => "Longer limit",
-        (_, _) => "Codex usage",
+    if let Some(tray) = app.tray_by_id("quotabuddy-tray") {
+        // The icon key is intentionally part of the deduplicated presentation now;
+        // issue #21 will map it to generated tray image bytes.
+        let _icon_key = presentation.icon_key;
+        let _ = tray.set_tooltip(Some(&presentation.tooltip));
     }
 }
 
@@ -361,6 +338,7 @@ pub fn run() {
             alerts: Mutex::new(AlertTracker::default()),
             backdrop: Mutex::new(windows_backdrop::BackdropMode::Solid),
             last_tray_rect: Mutex::new(None),
+            tray_presentation: Mutex::new(TrayPresentationTracker::default()),
         })
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
