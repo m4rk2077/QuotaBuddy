@@ -123,22 +123,12 @@ fn update_tray_presentation(
     snapshots: &[UsageSnapshot],
     preferences: &MonitorPreferences,
 ) {
-    let next = build_tray_presentation(snapshots, preferences);
-    let Some(presentation) = app
-        .state::<AppState>()
-        .tray_presentation
-        .lock()
-        .ok()
-        .and_then(|mut tracker| tracker.take_changed(next))
-    else {
+    let Some(tray) = app.tray_by_id("quotabuddy-tray") else {
         return;
     };
-
-    if let Some(tray) = app.tray_by_id("quotabuddy-tray") {
-        // The icon key is intentionally part of the deduplicated presentation now;
-        // issue #21 will map it to generated tray image bytes.
-        let _icon_key = presentation.icon_key;
-        let _ = tray.set_tooltip(Some(&presentation.tooltip));
+    let next = build_tray_presentation(snapshots, preferences);
+    if let Ok(mut tracker) = app.state::<AppState>().tray_presentation.lock() {
+        let _ = tracker.apply_tooltip_if_changed(&next, |tooltip| tray.set_tooltip(Some(tooltip)));
     }
 }
 

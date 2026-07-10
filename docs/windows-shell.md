@@ -34,5 +34,7 @@ the deterministic pure result if the Windows positioning call fails.
 ## Scope limits
 
 - No visual redesign from #20.
-- No dynamic tray icon or tray presentation reducer from #21.
+- Issue #19 adds the safe tray presentation reducer without changing native
+  shell geometry or backdrop behavior.
+- No dynamic tray icon from #21.
 - No Windows 10 experimental Acrylic.

@@ -106,16 +106,44 @@ pub fn build_tray_presentation(
 
 #[derive(Default)]
 pub struct TrayPresentationTracker {
-    last: Option<TrayPresentation>,
+    last_tooltip: Option<String>,
+    // Consumed by #21 when icon-key-to-image mapping is wired to Tauri.
+    #[allow(dead_code)]
+    last_icon_key: Option<TrayIconKey>,
 }
 
 impl TrayPresentationTracker {
-    pub fn take_changed(&mut self, next: TrayPresentation) -> Option<TrayPresentation> {
-        if self.last.as_ref() == Some(&next) {
-            return None;
+    pub fn apply_tooltip_if_changed<E, F>(
+        &mut self,
+        next: &TrayPresentation,
+        apply: F,
+    ) -> Result<bool, E>
+    where
+        F: FnOnce(&str) -> Result<(), E>,
+    {
+        if self.last_tooltip.as_deref() == Some(&next.tooltip) {
+            return Ok(false);
         }
-        self.last = Some(next.clone());
-        Some(next)
+        apply(&next.tooltip)?;
+        self.last_tooltip = Some(next.tooltip.clone());
+        Ok(true)
+    }
+
+    #[allow(dead_code)]
+    pub fn apply_icon_if_changed<E, F>(
+        &mut self,
+        next: &TrayPresentation,
+        apply: F,
+    ) -> Result<bool, E>
+    where
+        F: FnOnce(TrayIconKey) -> Result<(), E>,
+    {
+        if self.last_icon_key == Some(next.icon_key) {
+            return Ok(false);
+        }
+        apply(next.icon_key)?;
+        self.last_icon_key = Some(next.icon_key);
+        Ok(true)
     }
 }
 
@@ -341,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_identical_consecutive_presentations() {
+    fn suppresses_tooltip_and_icon_updates_independently() {
         let presentation = TrayPresentation {
             severity: TraySeverity::Healthy,
             tooltip: "Session 72% • Week 43%".to_owned(),
@@ -350,9 +378,45 @@ mod tests {
         let mut tracker = TrayPresentationTracker::default();
 
         assert_eq!(
-            tracker.take_changed(presentation.clone()),
-            Some(presentation.clone())
+            tracker.apply_tooltip_if_changed(&presentation, |_| Ok::<_, ()>(())),
+            Ok(true)
         );
-        assert_eq!(tracker.take_changed(presentation), None);
+        assert_eq!(
+            tracker.apply_icon_if_changed(&presentation, |_| Ok::<_, ()>(())),
+            Ok(true)
+        );
+
+        let icon_only_change = TrayPresentation {
+            severity: TraySeverity::Warning,
+            icon_key: TrayIconKey::Warning,
+            ..presentation
+        };
+        assert_eq!(
+            tracker.apply_tooltip_if_changed(&icon_only_change, |_| Ok::<_, ()>(())),
+            Ok(false)
+        );
+        assert_eq!(
+            tracker.apply_icon_if_changed(&icon_only_change, |_| Ok::<_, ()>(())),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn retries_an_update_that_failed_at_the_tray_boundary() {
+        let presentation = TrayPresentation {
+            severity: TraySeverity::Healthy,
+            tooltip: "Session 72%".to_owned(),
+            icon_key: TrayIconKey::Healthy,
+        };
+        let mut tracker = TrayPresentationTracker::default();
+
+        assert_eq!(
+            tracker.apply_tooltip_if_changed(&presentation, |_| Err("tray unavailable")),
+            Err("tray unavailable")
+        );
+        assert_eq!(
+            tracker.apply_tooltip_if_changed(&presentation, |_| Ok::<_, &str>(())),
+            Ok(true)
+        );
     }
 }
