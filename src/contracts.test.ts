@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { UsageSnapshot } from "./contracts";
 import { shouldShowEmptyState } from "./panel-state";
+import { canPinMetric, defaultMonitorPreferences } from "./monitor-controls";
 
 describe("UsageSnapshot frontend boundary", () => {
   it("accepts normalized snapshot metadata without credential material", () => {
@@ -19,6 +20,17 @@ describe("UsageSnapshot frontend boundary", () => {
     expect(Object.keys(snapshot)).not.toContain("token");
     expect(Object.keys(snapshot)).not.toContain("credentials");
     expect(snapshot.availability.clientDetected).toBe(true);
+  });
+});
+
+describe("monitor controls external behavior", () => {
+  it("defaults to English, dark theme, and 80%/95% alerts", () => {
+    expect(defaultMonitorPreferences).toMatchObject({ language: "en", theme: "dark", alertThresholds: [80, 95] });
+  });
+
+  it("allows no more than two pinned tray metrics", () => {
+    expect(canPinMetric(["session", "cycle"], "weekly")).toBe(false);
+    expect(canPinMetric(["session", "cycle"], "session")).toBe(true);
   });
 });
 
