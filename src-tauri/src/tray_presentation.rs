@@ -236,6 +236,7 @@ mod tests {
             remaining: Some(untrusted_text.to_owned()),
             total: Some(untrusted_text.to_owned()),
             is_estimate: false,
+            reset: None,
         }
     }
 

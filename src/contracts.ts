@@ -2,21 +2,26 @@ export type ProviderId = "codex" | "claudeCode" | "cursor";
 
 export type MetricKind = "session" | "weekly" | "cycle" | "credits" | "estimatedSpend";
 
+export type ResetMetadata = { resetsAt: string; label: string };
+
+export type UsageMetric = {
+  kind: MetricKind;
+  label: string;
+  usedPercentage: number | null;
+  remaining: string | null;
+  total: string | null;
+  isEstimate: boolean;
+  reset?: ResetMetadata | null;
+};
+
 export type UsageSnapshot = {
   provider: ProviderId;
   availability: {
     clientDetected: boolean;
     usageAvailable: boolean;
   };
-  metrics: Array<{
-    kind: MetricKind;
-    label: string;
-    usedPercentage: number | null;
-    remaining: string | null;
-    total: string | null;
-    isEstimate: boolean;
-  }>;
-  reset: { resetsAt: string; label: string } | null;
+  metrics: UsageMetric[];
+  reset: ResetMetadata | null;
   lastSuccessfulRefreshAt: string | null;
   status: "healthy" | "unavailable" | "failed" | "reauthRequired";
   error: { code: string; message: string } | null;

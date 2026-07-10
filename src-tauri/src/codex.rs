@@ -279,6 +279,13 @@ fn normalize_rate_limit_value(
         }
         let used_percent = used_percent.clamp(0.0, 100.0);
         let remaining = 100.0 - used_percent;
+        let metric_reset = window
+            .get("resetsAt")
+            .and_then(normalize_reset_timestamp)
+            .map(|resets_at| ResetMetadata {
+                resets_at,
+                label: "Reset time shown in your local timezone.".to_owned(),
+            });
         metrics.push(UsageMetric {
             kind,
             label: label.to_owned(),
@@ -286,16 +293,11 @@ fn normalize_rate_limit_value(
             remaining: Some(format!("{remaining:.0}% remaining")),
             total: None,
             is_estimate: false,
+            reset: metric_reset.clone(),
         });
 
         if reset.is_none() {
-            reset = window
-                .get("resetsAt")
-                .and_then(normalize_reset_timestamp)
-                .map(|resets_at| ResetMetadata {
-                    resets_at,
-                    label: "Reset time shown in your local timezone.".to_owned(),
-                });
+            reset = metric_reset;
         }
     }
 
@@ -401,10 +403,34 @@ mod tests {
         assert_eq!(snapshot.metrics[0].kind, MetricKind::Session);
         assert_eq!(snapshot.metrics[0].used_percentage, Some(28.0));
         assert_eq!(
+            snapshot.metrics[0]
+                .reset
+                .as_ref()
+                .map(|reset| reset.resets_at.as_str()),
+            Some("2026-07-11T12:00:00Z")
+        );
+        assert_eq!(
+            snapshot.metrics[1]
+                .reset
+                .as_ref()
+                .map(|reset| reset.resets_at.as_str()),
+            Some("2026-07-16T12:00:00Z")
+        );
+        assert_eq!(
             snapshot.metrics[0].remaining.as_deref(),
             Some("72% remaining")
         );
         assert!(snapshot.reset.is_some());
+        assert_eq!(
+            snapshot
+                .reset
+                .as_ref()
+                .map(|reset| reset.resets_at.as_str()),
+            snapshot.metrics[0]
+                .reset
+                .as_ref()
+                .map(|reset| reset.resets_at.as_str())
+        );
         assert!(snapshot.error.is_none());
     }
 

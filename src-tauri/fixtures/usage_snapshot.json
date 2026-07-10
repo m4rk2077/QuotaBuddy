@@ -11,7 +11,11 @@
       "usedPercentage": 42.5,
       "remaining": "57.5% remaining",
       "total": null,
-      "isEstimate": false
+      "isEstimate": false,
+      "reset": {
+        "resetsAt": "2026-07-11T10:00:00Z",
+        "label": "Resets tomorrow"
+      }
     }
   ],
   "reset": {
