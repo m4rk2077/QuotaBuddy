@@ -1,8 +1,9 @@
 # Windows shell backdrop and tray anchoring
 
 Issue #18 keeps one persistent Tauri/WebView2 window and changes only its native
-shell behavior. The current 960 x 680 DIP content remains unchanged pending the
-separate visual redesign.
+shell behavior. The current 960 x 680 DIP content remains unchanged here. Issue
+#20 will replace it with the approved compact panel at approximately 400 x 560
+DIP; positioning derives the live window size and has no 960 x 680 constant.
 
 ## Backdrop decision
 

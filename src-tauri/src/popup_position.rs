@@ -272,4 +272,33 @@ mod tests {
             PhysicalPoint { x: 1340, y: 197 }
         );
     }
+
+    #[test]
+    fn supports_the_compact_panel_target_without_geometry_changes() {
+        assert_eq!(
+            calculate_popup_position(
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1040,
+                },
+                PhysicalRect {
+                    x: 1800,
+                    y: 1040,
+                    width: 24,
+                    height: 40,
+                },
+                (400, 560),
+                1.5,
+            ),
+            PhysicalPoint { x: 1320, y: 200 }
+        );
+    }
 }
