@@ -287,13 +287,13 @@ mod tests {
 
         fs::write(
             &session,
-            "{\"model\":\"gpt-5-codex\"}\n{\"input_tokens\":250,\"output_tokens\":40}\n",
+            "{\"model\":\"gpt-5-codex\"}\n{\"input_tokens\":2500,\"output_tokens\":400}\n",
         )
         .unwrap();
         let changed = scanner.read_usage_records(&directory).unwrap();
 
         assert_eq!(scanner.parsed_file_count, parsed_after_first + 1);
-        assert_eq!(changed[0].input_tokens, 250);
+        assert_eq!(changed[0].input_tokens, 2500);
 
         fs::remove_file(&session).unwrap();
         assert!(scanner.read_usage_records(&directory).unwrap().is_empty());
