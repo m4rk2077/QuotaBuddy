@@ -15,10 +15,14 @@ async function runRefresh<T>(request: () => Promise<T>, callbacks: RefreshCallba
   }
 }
 
-export function runUsageRefresh<T>(request: () => Promise<T>, callbacks: RefreshCallbacks<T>): Promise<void> {
-  return runRefresh(request, callbacks);
-}
-
-export function runSpendRefresh<T>(request: () => Promise<T>, callbacks: RefreshCallbacks<T>): Promise<void> {
-  return runRefresh(request, callbacks);
+export function createSingleFlightRefresh<T>(request: () => Promise<T>, callbacks: RefreshCallbacks<T>): () => Promise<void> {
+  let inFlight: Promise<void> | null = null;
+  return () => {
+    if (inFlight) return inFlight;
+    const current = runRefresh(request, callbacks).finally(() => {
+      if (inFlight === current) inFlight = null;
+    });
+    inFlight = current;
+    return current;
+  };
 }

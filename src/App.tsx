@@ -5,7 +5,7 @@ import brandIcon from "../src-tauri/icons/icon.png";
 import type { SpendEstimate, UsageMetric, UsageSnapshot } from "./contracts";
 import { canPinMetric, defaultMonitorPreferences, getMonitorPreferences, saveMonitorPreferences, type MonitorPreferences } from "./monitor-controls";
 import { getMetricPresentation, getSnapshotDisplayState, selectOverviewMetrics, shouldShowEmptyState, type MetricSeverity } from "./panel-state";
-import { runSpendRefresh, runUsageRefresh } from "./refresh-state";
+import { createSingleFlightRefresh } from "./refresh-state";
 import { exportRedactedDiagnostics, getLocalSpendEstimate, getUsageSnapshots } from "./usage";
 import "./App.css";
 
@@ -26,17 +26,22 @@ function App() {
   const [diagnosticError, setDiagnosticError] = useState(false);
   const pendingPreferenceSave = useRef(Promise.resolve());
   const text = useMemo(() => preferences.language === "ptBr" ? { ...en, ...ptBr } : en, [preferences.language]);
-
-  const refresh = useCallback(() => {
-    void runUsageRefresh(getUsageSnapshots, {
+  const loadFailedText = useRef(text.loadFailed);
+  loadFailedText.current = text.loadFailed;
+  const usageRefresh = useRef<(() => Promise<void>) | null>(null);
+  const spendRefresh = useRef<(() => Promise<void>) | null>(null);
+  if (!usageRefresh.current) {
+    usageRefresh.current = createSingleFlightRefresh(getUsageSnapshots, {
       loading: (value) => {
         setLoading(value);
         if (value) setLoadError(null);
       },
       success: setSnapshots,
-      failure: () => setLoadError(text.loadFailed),
+      failure: () => setLoadError(loadFailedText.current),
     });
-    void runSpendRefresh(getLocalSpendEstimate, {
+  }
+  if (!spendRefresh.current) {
+    spendRefresh.current = createSingleFlightRefresh(getLocalSpendEstimate, {
       loading: (value) => {
         setEstimateLoading(value);
         if (value) setEstimateError(false);
@@ -50,7 +55,12 @@ function App() {
         setEstimateError(true);
       },
     });
-  }, [text.loadFailed]);
+  }
+
+  const refresh = useCallback(() => {
+    void usageRefresh.current?.();
+    void spendRefresh.current?.();
+  }, []);
 
   useEffect(() => {
     void getMonitorPreferences().then(setPreferences).catch(() => setLoadError(text.preferencesFailed));
