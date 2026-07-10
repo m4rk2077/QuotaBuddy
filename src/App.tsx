@@ -21,6 +21,7 @@ function App() {
   const [estimate, setEstimate] = useState<SpendEstimate | null>(null);
   const [estimateError, setEstimateError] = useState(false);
   const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
+  const [diagnosticError, setDiagnosticError] = useState(false);
   const pendingPreferenceSave = useRef(Promise.resolve());
   const text = useMemo(() => preferences.language === "ptBr" ? { ...en, ...ptBr } : en, [preferences.language]);
 
@@ -90,8 +91,10 @@ function App() {
     try {
       const path = await exportRedactedDiagnostics();
       setDiagnosticStatus(`${text.diagnosticsSaved} ${path}`);
+      setDiagnosticError(false);
     } catch {
       setDiagnosticStatus(text.diagnosticsFailed);
+      setDiagnosticError(true);
     }
   }, [text]);
 
@@ -115,6 +118,7 @@ function App() {
           text={text}
           saving={savingPreferences}
           diagnosticStatus={diagnosticStatus}
+          diagnosticError={diagnosticError}
           onBack={() => setView("overview")}
           onChange={updatePreferences}
           onExport={exportDiagnostics}
@@ -251,11 +255,12 @@ function SpendRow({ estimate, unavailable, text }: { estimate: SpendEstimate | n
   </section>;
 }
 
-function SettingsPanel({ preferences, text, saving, diagnosticStatus, onBack, onChange, onExport }: {
+function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnosticError, onBack, onChange, onExport }: {
   preferences: MonitorPreferences;
   text: Copy;
   saving: boolean;
   diagnosticStatus: string | null;
+  diagnosticError: boolean;
   onBack: () => void;
   onChange: (preferences: MonitorPreferences) => Promise<void>;
   onExport: () => void;
@@ -291,7 +296,7 @@ function SettingsPanel({ preferences, text, saving, diagnosticStatus, onBack, on
       <div className="settings-group diagnostics">
         <h2>{text.privacy}</h2><p>{text.diagnosticsDescription}</p>
         <button className="secondary-button" type="button" onClick={onExport}>{text.exportDiagnostics}</button>
-        {diagnosticStatus ? <p className="diagnostic-status" role="status">{diagnosticStatus}</p> : null}
+        {diagnosticStatus ? <p className={`diagnostic-status${diagnosticError ? " error" : ""}`} role="status">{diagnosticStatus}</p> : null}
       </div>
     </div>
   </section>;

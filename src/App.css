@@ -145,7 +145,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .number-field { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); }
 .diagnostics p { color: var(--text-secondary); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .secondary-button { min-height: 34px; border: 1px solid var(--border-strong); border-radius: 9px; color: var(--text-primary); background: var(--surface-control); cursor: pointer; }
-.diagnostic-status { color: var(--status-success) !important; }
+.diagnostics .diagnostic-status { color: var(--status-success); }
+.diagnostics .diagnostic-status.error { color: var(--accent-danger); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
