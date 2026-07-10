@@ -1,5 +1,7 @@
 export type ProviderId = "codex" | "claudeCode" | "cursor";
 
+export type MetricKind = "session" | "weekly" | "cycle" | "credits" | "estimatedSpend";
+
 export type UsageSnapshot = {
   provider: ProviderId;
   availability: {
@@ -7,7 +9,7 @@ export type UsageSnapshot = {
     usageAvailable: boolean;
   };
   metrics: Array<{
-    kind: "session" | "weekly" | "cycle" | "credits" | "estimatedSpend";
+    kind: MetricKind;
     label: string;
     usedPercentage: number | null;
     remaining: string | null;
