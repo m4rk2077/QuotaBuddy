@@ -1,0 +1,17 @@
+QuotaBuddy
+Copyright (c) 2026 QuotaBuddy contributors
+Licensed under the MIT License. See LICENSE.
+
+This application includes open-source components. Their licenses remain
+applicable to the distributed installer and source:
+
+- Tauri and Tauri plugins: MIT OR Apache-2.0
+- Serde, serde_json, regex and their Rust dependency graph: MIT OR Apache-2.0
+- React and React DOM: MIT
+- Vite, Vitest, TypeScript and their build-time dependency graph: their
+  respective upstream licenses
+
+The installer does not bundle a QuotaBuddy backend, telemetry SDK, or provider
+credential library. Before publishing a new release, maintainers must review
+the resolved npm and Cargo dependency licenses and retain any additional
+upstream notices required by changed dependencies.

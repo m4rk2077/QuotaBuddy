@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-release.ps1",
+    "release:checksums": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/write-release-checksums.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
