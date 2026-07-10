@@ -1,12 +1,17 @@
 mod codex;
 mod core;
 mod detection;
+mod diagnostics;
 mod monitor_controls;
+mod spend;
 
 use std::{fs, sync::Mutex, thread, time::Duration};
 
 use core::{sanitize_for_frontend, ProviderId, UsageSnapshot};
+use diagnostics::write_diagnostic_export;
 use monitor_controls::{crossing_alerts, validate_preferences, AlertTracker, MonitorPreferences};
+use spend::{bundled_pricing_table, estimate_spend, read_usage_records, SpendEstimate};
+use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -189,6 +194,38 @@ fn save_monitor_preferences(
     Ok(preferences)
 }
 
+fn codex_log_directory() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|home| PathBuf::from(home).join(".codex").join("sessions"))
+}
+
+fn local_spend_estimate() -> Result<SpendEstimate, String> {
+    let records = match codex_log_directory() {
+        Some(path) => read_usage_records(&path).map_err(|error| error.to_string())?,
+        None => Vec::new(),
+    };
+    Ok(estimate_spend(&records, &bundled_pricing_table()))
+}
+
+#[tauri::command]
+fn get_local_spend_estimate() -> Result<SpendEstimate, String> {
+    local_spend_estimate()
+}
+
+#[tauri::command]
+fn export_redacted_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let destination = directory.join("quotabuddy-diagnostics-redacted.json");
+    write_diagnostic_export(&destination, local_spend_estimate()?)
+        .map_err(|error| error.to_string())?;
+    Ok(destination.display().to_string())
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -255,7 +292,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_usage_snapshots,
             get_monitor_preferences,
-            save_monitor_preferences
+            save_monitor_preferences,
+            get_local_spend_estimate,
+            export_redacted_diagnostics
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

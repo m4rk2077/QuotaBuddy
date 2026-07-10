@@ -22,3 +22,11 @@ export type UsageSnapshot = {
   error: { code: string; message: string } | null;
   isStale: boolean;
 };
+
+export type SpendEstimate = {
+  amountUsd: number;
+  pricingTableVersion: string;
+  recordCount: number;
+  isEstimate: boolean;
+  label: string;
+};
