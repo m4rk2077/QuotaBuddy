@@ -36,7 +36,14 @@ New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $releaseInstaller = Join-Path $OutputDirectory $installer.Name
 Copy-Item -LiteralPath $installer.FullName -Destination $releaseInstaller -Force
 
-$sha256 = (Get-FileHash -LiteralPath $releaseInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+$sha256Algorithm = [System.Security.Cryptography.SHA256]::Create()
+$releaseStream = [System.IO.File]::OpenRead($releaseInstaller)
+try {
+    $sha256 = [System.BitConverter]::ToString($sha256Algorithm.ComputeHash($releaseStream)).Replace("-", "").ToLowerInvariant()
+} finally {
+    $releaseStream.Dispose()
+    $sha256Algorithm.Dispose()
+}
 $checksumPath = "$releaseInstaller.sha256"
 Set-Content -LiteralPath $checksumPath -Value "$sha256 *$($installer.Name)" -Encoding ascii -NoNewline
 
