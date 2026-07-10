@@ -65,6 +65,7 @@ pub enum SnapshotStatus {
     Healthy,
     Unavailable,
     Failed,
+    ReauthRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,28 +79,6 @@ pub struct SnapshotError {
 pub struct DetectedClient {
     pub provider: ProviderId,
     pub executable: String,
-}
-
-pub fn snapshots_for_detected_clients(clients: Vec<DetectedClient>) -> Vec<UsageSnapshot> {
-    clients
-        .into_iter()
-        .map(|client| UsageSnapshot {
-            provider: client.provider,
-            availability: Availability {
-                client_detected: true,
-                usage_available: false,
-            },
-            metrics: Vec::new(),
-            reset: None,
-            last_successful_refresh_at: None,
-            status: SnapshotStatus::Unavailable,
-            error: Some(SnapshotError {
-                code: "adapter_not_installed".to_owned(),
-                message: "Usage adapter is not installed yet.".to_owned(),
-            }),
-            is_stale: false,
-        })
-        .collect()
 }
 
 /// Last boundary before a normalized snapshot crosses into the webview.
@@ -216,23 +195,5 @@ mod tests {
         ] {
             assert!(!serialized.contains(secret));
         }
-    }
-
-    #[test]
-    fn only_detected_clients_become_visible_snapshots() {
-        let visible = snapshots_for_detected_clients(vec![DetectedClient {
-            provider: ProviderId::Codex,
-            executable: "codex.exe".to_owned(),
-        }]);
-
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].provider, ProviderId::Codex);
-        assert!(visible[0].availability.client_detected);
-        assert!(!visible[0].availability.usage_available);
-    }
-
-    #[test]
-    fn no_detected_client_produces_no_snapshot() {
-        assert!(snapshots_for_detected_clients(Vec::new()).is_empty());
     }
 }

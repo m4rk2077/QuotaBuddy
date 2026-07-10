@@ -16,7 +16,7 @@ export type UsageSnapshot = {
   }>;
   reset: { resetsAt: string; label: string } | null;
   lastSuccessfulRefreshAt: string | null;
-  status: "healthy" | "unavailable" | "failed";
+  status: "healthy" | "unavailable" | "failed" | "reauthRequired";
   error: { code: string; message: string } | null;
   isStale: boolean;
 };

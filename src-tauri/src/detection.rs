@@ -2,11 +2,8 @@ use std::process::Command;
 
 use crate::core::{DetectedClient, ProviderId};
 
-const CLIENT_CANDIDATES: &[(ProviderId, &[&str])] = &[
-    (ProviderId::Codex, &["codex.exe", "codex"]),
-    (ProviderId::ClaudeCode, &["claude.exe", "claude"]),
-    (ProviderId::Cursor, &["cursor.exe", "cursor"]),
-];
+const CLIENT_CANDIDATES: &[(ProviderId, &[&str])] =
+    &[(ProviderId::Codex, &["codex.cmd", "codex.exe", "codex"])];
 
 /// Returns only clients found on PATH. Missing clients are deliberately absent.
 pub fn detect_installed_clients() -> Vec<DetectedClient> {

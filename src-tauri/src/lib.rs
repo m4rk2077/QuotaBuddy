@@ -1,7 +1,10 @@
+mod codex;
 mod core;
 mod detection;
 
-use core::{sanitize_for_frontend, snapshots_for_detected_clients, UsageSnapshot};
+use std::sync::Mutex;
+
+use core::{sanitize_for_frontend, ProviderId, UsageSnapshot};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -9,13 +12,22 @@ use tauri::{
 };
 
 #[tauri::command]
-fn get_usage_snapshots() -> Vec<UsageSnapshot> {
-    // Adapters added in later tickets will read sessions inside Rust and emit this contract.
-    // No credential material can enter this command response.
-    snapshots_for_detected_clients(detection::detect_installed_clients())
+fn get_usage_snapshots(state: tauri::State<'_, AppState>) -> Vec<UsageSnapshot> {
+    detection::detect_installed_clients()
         .into_iter()
-        .map(sanitize_for_frontend)
+        .filter(|client| client.provider == ProviderId::Codex)
+        .filter_map(|client| {
+            let mut cache = state.codex_cache.lock().ok()?;
+            Some(sanitize_for_frontend(codex::refresh_snapshot(
+                &mut cache,
+                &client.executable,
+            )))
+        })
         .collect()
+}
+
+struct AppState {
+    codex_cache: Mutex<codex::SnapshotCache>,
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -29,6 +41,9 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(AppState {
+            codex_cache: Mutex::new(codex::SnapshotCache::default()),
+        })
         .setup(|app| {
             core::log_redacted("QuotaBuddy native shell initialized");
             let open = MenuItem::with_id(app, "open", "Open QuotaBuddy", true, None::<&str>)?;

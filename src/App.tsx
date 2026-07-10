@@ -11,6 +11,13 @@ const providerLabels: Record<UsageSnapshot["provider"], string> = {
   cursor: "Cursor",
 };
 
+function resetMessage(snapshot: UsageSnapshot): string | null {
+  if (!snapshot.reset) return null;
+  const date = new Date(snapshot.reset.resetsAt);
+  if (Number.isNaN(date.getTime())) return snapshot.reset.label;
+  return `Resets ${date.toLocaleString()}`;
+}
+
 function App() {
   const [snapshots, setSnapshots] = useState<UsageSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,6 +37,8 @@ function App() {
 
   useEffect(() => {
     void refresh();
+    const interval = window.setInterval(() => void refresh(), 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
   }, [refresh]);
 
   return (
@@ -51,13 +60,24 @@ function App() {
         <section className="empty-state" aria-label="No supported clients detected">
           <span aria-hidden="true">⌁</span>
           <h2>No supported client detected</h2>
-          <p>Install or add Codex, Claude Code, or Cursor to your PATH. QuotaBuddy will keep this panel uncluttered until then.</p>
+          <p>Install or add Codex to your PATH. QuotaBuddy will keep this panel uncluttered until then.</p>
         </section>
       ) : null}
 
       <section className="snapshot-grid" aria-live="polite">
         {snapshots.map((snapshot) => (
-          <article className="snapshot-card" key={snapshot.provider}>
+          <SnapshotCard key={snapshot.provider} snapshot={snapshot} />
+        ))}
+      </section>
+    </main>
+  );
+}
+
+function SnapshotCard({ snapshot }: { snapshot: UsageSnapshot }) {
+  const reset = resetMessage(snapshot);
+
+  return (
+    <article className="snapshot-card">
             <div className="card-title">
               <h2>{providerLabels[snapshot.provider]}</h2>
               <span className={`status ${snapshot.status}`}>{snapshot.status}</span>
@@ -73,13 +93,10 @@ function App() {
             ) : (
               <p className="unavailable">Usage adapter arrives in a later ticket.</p>
             )}
-            {snapshot.reset ? <p className="reset">{snapshot.reset.label}</p> : null}
+            {reset ? <p className="reset">{reset}</p> : null}
             {snapshot.isStale ? <p className="notice">Showing last successful snapshot.</p> : null}
             {snapshot.error ? <p className="notice">{snapshot.error.message}</p> : null}
-          </article>
-        ))}
-      </section>
-    </main>
+    </article>
   );
 }
 
