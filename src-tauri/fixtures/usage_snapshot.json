@@ -1,0 +1,25 @@
+{
+  "provider": "codex",
+  "availability": {
+    "clientDetected": true,
+    "usageAvailable": true
+  },
+  "metrics": [
+    {
+      "kind": "session",
+      "label": "Session",
+      "usedPercentage": 42.5,
+      "remaining": "57.5% remaining",
+      "total": null,
+      "isEstimate": false
+    }
+  ],
+  "reset": {
+    "resetsAt": "2026-07-11T10:00:00Z",
+    "label": "Resets tomorrow"
+  },
+  "lastSuccessfulRefreshAt": "2026-07-10T10:00:00Z",
+  "status": "healthy",
+  "error": null,
+  "isStale": false
+}
