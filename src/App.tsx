@@ -5,6 +5,7 @@ import brandIcon from "../src-tauri/icons/icon.png";
 import type { SpendEstimate, UsageMetric, UsageSnapshot } from "./contracts";
 import { canPinMetric, defaultMonitorPreferences, getMonitorPreferences, saveMonitorPreferences, type MonitorPreferences } from "./monitor-controls";
 import { getMetricPresentation, getSnapshotDisplayState, selectOverviewMetrics, shouldShowEmptyState, type MetricSeverity } from "./panel-state";
+import { runSpendRefresh, runUsageRefresh } from "./refresh-state";
 import { exportRedactedDiagnostics, getLocalSpendEstimate, getUsageSnapshots } from "./usage";
 import "./App.css";
 
@@ -19,26 +20,36 @@ function App() {
   const [preferences, setPreferences] = useState<MonitorPreferences>(defaultMonitorPreferences);
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [estimate, setEstimate] = useState<SpendEstimate | null>(null);
+  const [estimateLoading, setEstimateLoading] = useState(true);
   const [estimateError, setEstimateError] = useState(false);
   const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
   const [diagnosticError, setDiagnosticError] = useState(false);
   const pendingPreferenceSave = useRef(Promise.resolve());
   const text = useMemo(() => preferences.language === "ptBr" ? { ...en, ...ptBr } : en, [preferences.language]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    const [usageResult, estimateResult] = await Promise.allSettled([getUsageSnapshots(), getLocalSpendEstimate()]);
-    if (usageResult.status === "fulfilled") setSnapshots(usageResult.value);
-    else setLoadError(text.loadFailed);
-    if (estimateResult.status === "fulfilled") {
-      setEstimate(estimateResult.value);
-      setEstimateError(false);
-    } else {
-      setEstimate(null);
-      setEstimateError(true);
-    }
-    setLoading(false);
+  const refresh = useCallback(() => {
+    void runUsageRefresh(getUsageSnapshots, {
+      loading: (value) => {
+        setLoading(value);
+        if (value) setLoadError(null);
+      },
+      success: setSnapshots,
+      failure: () => setLoadError(text.loadFailed),
+    });
+    void runSpendRefresh(getLocalSpendEstimate, {
+      loading: (value) => {
+        setEstimateLoading(value);
+        if (value) setEstimateError(false);
+      },
+      success: (value) => {
+        setEstimate(value);
+        setEstimateError(false);
+      },
+      failure: () => {
+        setEstimate(null);
+        setEstimateError(true);
+      },
+    });
   }, [text.loadFailed]);
 
   useEffect(() => {
@@ -106,6 +117,7 @@ function App() {
           loading={loading}
           loadError={loadError}
           estimate={estimate}
+          estimateLoading={estimateLoading}
           estimateError={estimateError}
           preferences={preferences}
           text={text}
@@ -128,11 +140,12 @@ function App() {
   );
 }
 
-function Overview({ snapshots, loading, loadError, estimate, estimateError, preferences, text, onRefresh, onSettings }: {
+function Overview({ snapshots, loading, loadError, estimate, estimateLoading, estimateError, preferences, text, onRefresh, onSettings }: {
   snapshots: UsageSnapshot[];
   loading: boolean;
   loadError: string | null;
   estimate: SpendEstimate | null;
+  estimateLoading: boolean;
   estimateError: boolean;
   preferences: MonitorPreferences;
   text: Copy;
@@ -152,7 +165,7 @@ function Overview({ snapshots, loading, loadError, estimate, estimateError, pref
         <MetricCard slot="weekly" metric={selected.weekly} snapshot={snapshot} loading={loading} thresholds={preferences.alertThresholds} text={text} />
       </section>
     )}
-    <SpendRow estimate={estimate} unavailable={estimateError} text={text} />
+    <SpendRow estimate={estimate} loading={estimateLoading} unavailable={estimateError} text={text} />
     <footer className="panel-footer">
       <span className="privacy-note">{text.localOnly}</span>
       <div className="footer-actions">
@@ -246,12 +259,12 @@ function MetricSkeleton({ title }: { title: string }) {
   </article>;
 }
 
-function SpendRow({ estimate, unavailable, text }: { estimate: SpendEstimate | null; unavailable: boolean; text: Copy }) {
+function SpendRow({ estimate, loading, unavailable, text }: { estimate: SpendEstimate | null; loading: boolean; unavailable: boolean; text: Copy }) {
   const amount = estimate ? new Intl.NumberFormat(text.locale, { style: "currency", currency: "USD" }).format(estimate.amountUsd) : "—";
-  return <section className="spend-row" aria-label={text.estimatedSpend}>
+  return <section className="spend-row" aria-label={text.estimatedSpend} aria-busy={loading}>
     <WalletIcon />
-    <div><span>{text.estimatedSpend}</span><small>{estimate?.isEstimate ? text.estimate : text.localData}</small></div>
-    <strong>{unavailable ? text.unavailable : amount}</strong>
+    <div><span>{text.estimatedSpend}</span><small>{loading ? text.calculatingEstimate : estimate?.isEstimate ? text.estimate : text.localData}</small></div>
+    <strong>{loading ? "…" : unavailable ? text.unavailable : amount}</strong>
   </section>;
 }
 
@@ -364,7 +377,7 @@ const en = {
   locale: "en-US", loadFailed: "Could not update usage", preferencesFailed: "Preferences unavailable", preferencesSaveFailed: "Could not save preferences",
   refresh: "Refresh", refreshing: "Updating…", updateFailed: "Update failed", updateFailedDescription: "QuotaBuddy could not read local usage. Try again from the refresh button.", failedWithCache: "Update failed · showing cached data", updatedNow: "Updated just now", updatedMinutes: "Updated {minutes} min ago", noClient: "Codex not detected", noClientDescription: "Open or sign in to Codex, then refresh. QuotaBuddy will keep checking locally.",
   session: "Session limit", weekly: "Weekly limit", remaining: "remaining", warningRemaining: "remaining · attention", criticalRemaining: "remaining · critical", unavailable: "Unavailable", stale: "Data may be out of date", staleShort: "remaining · stale", failedCachedShort: "remaining · update failed", reauthRequired: "Sign in to Codex again", reauthShort: "Sign in required",
-  resetsIn: "resets in {duration}", resetNow: "resets now", resetUnknown: "reset unavailable", estimatedSpend: "Estimated spend", estimate: "Estimate", localData: "Local data", localOnly: "Local & private",
+  resetsIn: "resets in {duration}", resetNow: "resets now", resetUnknown: "reset unavailable", estimatedSpend: "Estimated spend", calculatingEstimate: "Calculating locally…", estimate: "Estimate", localData: "Local data", localOnly: "Local & private",
   settings: "Settings", back: "Back to usage", settingsSubtitle: "Local monitor preferences", saving: "Saving…", appearance: "Appearance", theme: "Theme", dark: "Dark", light: "Light", language: "Language", behavior: "Behavior", startup: "Start QuotaBuddy with Windows", alerts: "Usage alerts", warningAt: "Warning at", criticalAt: "Critical at", tray: "Tray metrics (up to two)", privacy: "Privacy & diagnostics", diagnosticsDescription: "Exports a redacted local diagnostic file. Credentials are never included.", exportDiagnostics: "Export redacted diagnostics", diagnosticsSaved: "Saved:", diagnosticsFailed: "Could not export diagnostics.",
 };
 
@@ -372,7 +385,7 @@ const ptBr: Partial<Copy> = {
   locale: "pt-BR", loadFailed: "Não foi possível atualizar o uso", preferencesFailed: "Preferências indisponíveis", preferencesSaveFailed: "Não foi possível salvar as preferências",
   refresh: "Atualizar", refreshing: "Atualizando…", updateFailed: "Falha na atualização", updateFailedDescription: "O QuotaBuddy não conseguiu ler o uso local. Tente novamente pelo botão de atualizar.", failedWithCache: "Falha ao atualizar · exibindo dados salvos", updatedNow: "Atualizado agora", updatedMinutes: "Atualizado há {minutes} min", noClient: "Codex não detectado", noClientDescription: "Abra ou entre no Codex e atualize. O QuotaBuddy continuará verificando localmente.",
   session: "Limite da sessão", weekly: "Limite semanal", remaining: "restante", warningRemaining: "restante · atenção", criticalRemaining: "restante · crítico", unavailable: "Indisponível", stale: "Dados podem estar desatualizados", staleShort: "restante · desatualizado", failedCachedShort: "restante · falha ao atualizar", reauthRequired: "Entre novamente no Codex", reauthShort: "Login necessário",
-  resetsIn: "reinicia em {duration}", resetNow: "reinicia agora", resetUnknown: "reinício indisponível", estimatedSpend: "Gasto estimado", estimate: "Estimativa", localData: "Dados locais", localOnly: "Local e privado",
+  resetsIn: "reinicia em {duration}", resetNow: "reinicia agora", resetUnknown: "reinício indisponível", estimatedSpend: "Gasto estimado", calculatingEstimate: "Calculando localmente…", estimate: "Estimativa", localData: "Dados locais", localOnly: "Local e privado",
   settings: "Configurações", back: "Voltar ao uso", settingsSubtitle: "Preferências do monitor local", saving: "Salvando…", appearance: "Aparência", theme: "Tema", dark: "Escuro", light: "Claro", language: "Idioma", behavior: "Comportamento", startup: "Iniciar o QuotaBuddy com o Windows", alerts: "Alertas de uso", warningAt: "Atenção em", criticalAt: "Crítico em", tray: "Métricas da bandeja (até duas)", privacy: "Privacidade e diagnóstico", diagnosticsDescription: "Exporta um arquivo local redigido. Credenciais nunca são incluídas.", exportDiagnostics: "Exportar diagnóstico redigido", diagnosticsSaved: "Salvo:", diagnosticsFailed: "Não foi possível exportar o diagnóstico.",
 };
 
