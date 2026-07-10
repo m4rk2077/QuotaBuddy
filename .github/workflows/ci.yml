@@ -14,12 +14,6 @@ jobs:
     runs-on: windows-latest
     env:
       CI: "true"
-      QUOTABUDDY_TEST_HOME: ${{ runner.temp }}\quotabuddy-isolated
-      CODEX_HOME: ${{ runner.temp }}\quotabuddy-isolated\codex
-      APPDATA: ${{ runner.temp }}\quotabuddy-isolated\appdata
-      LOCALAPPDATA: ${{ runner.temp }}\quotabuddy-isolated\localappdata
-      XDG_CONFIG_HOME: ${{ runner.temp }}\quotabuddy-isolated\config
-      XDG_DATA_HOME: ${{ runner.temp }}\quotabuddy-isolated\data
       CARGO_TARGET_DIR: ${{ github.workspace }}\src-tauri\target-ci
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +26,19 @@ jobs:
       - name: Prepare isolated local paths
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path $env:QUOTABUDDY_TEST_HOME, $env:CODEX_HOME, $env:APPDATA, $env:LOCALAPPDATA, $env:XDG_CONFIG_HOME, $env:XDG_DATA_HOME | Out-Null
+          $isolated = Join-Path $env:RUNNER_TEMP "quotabuddy-isolated"
+          $paths = @{
+            QUOTABUDDY_TEST_HOME = $isolated
+            CODEX_HOME = Join-Path $isolated "codex"
+            APPDATA = Join-Path $isolated "appdata"
+            LOCALAPPDATA = Join-Path $isolated "localappdata"
+            XDG_CONFIG_HOME = Join-Path $isolated "config"
+            XDG_DATA_HOME = Join-Path $isolated "data"
+          }
+          $paths.GetEnumerator() | ForEach-Object {
+            New-Item -ItemType Directory -Force -Path $_.Value | Out-Null
+            Add-Content -Path $env:GITHUB_ENV -Value "$($_.Key)=$($_.Value)"
+          }
 
       - name: Install locked frontend dependencies
         run: npm ci
