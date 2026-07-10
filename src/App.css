@@ -1,0 +1,44 @@
+:root {
+  color: #f4f7fb;
+  background: #111827;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button { font: inherit; }
+
+.app-shell { max-width: 1120px; margin: 0 auto; padding: 56px 32px; }
+.app-header { display: flex; gap: 24px; justify-content: space-between; align-items: start; margin-bottom: 40px; }
+.eyebrow { margin: 0 0 8px; color: #7dd3fc; font-size: .72rem; font-weight: 700; letter-spacing: .14em; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: 8px; font-size: clamp(2.2rem, 5vw, 3.75rem); letter-spacing: -.05em; }
+.subtitle { max-width: 650px; margin-bottom: 0; color: #b7c5d9; }
+.refresh { border: 1px solid #6ee7b7; border-radius: 8px; padding: 10px 16px; color: #062b21; background: #6ee7b7; cursor: pointer; font-weight: 650; }
+.refresh:disabled { cursor: wait; opacity: .65; }
+.snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.snapshot-card, .empty-state { border: 1px solid #334155; border-radius: 14px; background: #172033; box-shadow: 0 18px 48px #03071233; }
+.snapshot-card { padding: 20px; }
+.card-title, .metric > div { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.card-title h2 { margin-bottom: 20px; font-size: 1.1rem; }
+.status { border-radius: 99px; padding: 3px 8px; font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+.status.healthy { color: #bbf7d0; background: #14532d; }
+.status.unavailable, .status.failed { color: #fde68a; background: #78350f; }
+.metric { margin: 18px 0; }
+.metric span, .reset, .notice, .unavailable { color: #b7c5d9; font-size: .88rem; }
+.metric strong { color: #f8fafc; }
+progress { width: 100%; height: 8px; margin-top: 9px; accent-color: #38bdf8; }
+small { display: block; margin-top: 6px; color: #fcd34d; }
+.empty-state { max-width: 620px; padding: 42px; text-align: center; }
+.empty-state span { display: block; margin-bottom: 14px; color: #7dd3fc; font-size: 3rem; }
+.empty-state h2 { margin-bottom: 10px; }
+.empty-state p { margin-bottom: 0; color: #b7c5d9; }
+.notice { margin: 0 0 16px; }
+.notice.error { color: #fecaca; }
+
+@media (max-width: 620px) {
+  .app-shell { padding: 32px 20px; }
+  .app-header { flex-direction: column; }
+}
