@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import brandIcon from "../src-tauri/icons/icon.png";
 import type { SpendEstimate, UsageMetric, UsageSnapshot } from "./contracts";
-import { canPinMetric, defaultMonitorPreferences, getMonitorPreferences, saveMonitorPreferences, type MonitorPreferences } from "./monitor-controls";
+import { canPinMetric, defaultMonitorPreferences, getMonitorPreferences, MonitorPreferenceSaveCoordinator, saveMonitorPreferences, updateAlertThresholds, type MonitorPreferences } from "./monitor-controls";
 import { getMetricPresentation, getSnapshotDisplayState, selectOverviewMetrics, shouldShowEmptyState, type MetricSeverity } from "./panel-state";
 import { createSingleFlightRefresh } from "./refresh-state";
 import { exportRedactedDiagnostics, getLocalSpendEstimate, getUsageSnapshots } from "./usage";
@@ -25,9 +25,15 @@ function App() {
   const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
   const [diagnosticError, setDiagnosticError] = useState(false);
   const pendingPreferenceSave = useRef(Promise.resolve());
+  const preferenceSaveCoordinator = useRef<MonitorPreferenceSaveCoordinator | null>(null);
+  if (!preferenceSaveCoordinator.current) {
+    preferenceSaveCoordinator.current = new MonitorPreferenceSaveCoordinator(defaultMonitorPreferences);
+  }
   const text = useMemo(() => preferences.language === "ptBr" ? { ...en, ...ptBr } : en, [preferences.language]);
   const loadFailedText = useRef(text.loadFailed);
   loadFailedText.current = text.loadFailed;
+  const preferencesFailedText = useRef(text.preferencesFailed);
+  preferencesFailedText.current = text.preferencesFailed;
   const usageRefresh = useRef<(() => Promise<void>) | null>(null);
   const spendRefresh = useRef<(() => Promise<void>) | null>(null);
   if (!usageRefresh.current) {
@@ -63,8 +69,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void getMonitorPreferences().then(setPreferences).catch(() => setLoadError(text.preferencesFailed));
-  }, [text.preferencesFailed]);
+    void getMonitorPreferences()
+      .then((loaded) => {
+        const hydrated = preferenceSaveCoordinator.current?.hydrate(loaded);
+        if (hydrated) setPreferences(hydrated);
+      })
+      .catch(() => setLoadError(preferencesFailedText.current));
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -93,18 +104,23 @@ function App() {
   }, [view]);
 
   const updatePreferences = async (next: MonitorPreferences) => {
+    const coordinator = preferenceSaveCoordinator.current;
+    if (!coordinator) return;
+    const ticket = coordinator.begin(next);
     setPreferences(next);
     setSavingPreferences(true);
     const save = pendingPreferenceSave.current.then(() => saveMonitorPreferences(next));
     pendingPreferenceSave.current = save.then(() => undefined, () => undefined);
-    try {
-      setPreferences(await save);
-      void refresh();
-    } catch {
-      setLoadError(text.preferencesSaveFailed);
-    } finally {
-      setSavingPreferences(false);
+    const result = await coordinator.settle(ticket, save);
+    if (result.applyToView) {
+      setPreferences(result.preferences);
     }
+    if (result.failed) {
+      setLoadError(text.preferencesSaveFailed);
+    } else {
+      void refresh();
+    }
+    setSavingPreferences(result.saving);
   };
 
   const exportDiagnostics = useCallback(async () => {
@@ -292,9 +308,9 @@ function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnostic
     const pinnedMetrics = preferences.pinnedMetrics.includes(kind) ? preferences.pinnedMetrics.filter((value) => value !== kind) : [...preferences.pinnedMetrics, kind];
     void onChange({ ...preferences, pinnedMetrics });
   };
-  const setThreshold = (index: number, value: number) => {
-    const alertThresholds = [...preferences.alertThresholds];
-    alertThresholds[index] = value;
+  const setThreshold = (index: number, rawValue: string) => {
+    const alertThresholds = updateAlertThresholds(preferences.alertThresholds, index, rawValue);
+    if (!alertThresholds) return;
     void onChange({ ...preferences, alertThresholds });
   };
   const metrics: MonitorPreferences["pinnedMetrics"][number][] = ["session", "cycle"];
@@ -314,7 +330,7 @@ function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnostic
         <h2>{text.behavior}</h2>
         <label className="check"><input type="checkbox" checked={preferences.startWithWindows} onChange={(event) => void onChange({ ...preferences, startWithWindows: event.target.checked })} /><span>{text.startup}</span></label>
       </div>
-      <fieldset className="settings-group"><legend>{text.alerts}</legend>{preferences.alertThresholds.map((threshold, index) => <label key={index}>{index === 0 ? text.warningAt : text.criticalAt}<span className="number-field"><input type="number" min="1" max="100" value={threshold} onChange={(event) => setThreshold(index, Number(event.target.value))} />%</span></label>)}</fieldset>
+      <fieldset className="settings-group"><legend>{text.alerts}</legend>{preferences.alertThresholds.map((threshold, index) => <label key={index}>{index === 0 ? text.warningAt : text.criticalAt}<span className="number-field"><input type="number" min="1" max="100" value={threshold} onChange={(event) => setThreshold(index, event.target.value)} />%</span></label>)}</fieldset>
       <fieldset className="settings-group"><legend>{text.tray}</legend>{metrics.map((kind) => <label className="check" key={kind}><input type="checkbox" checked={preferences.pinnedMetrics.includes(kind)} disabled={!canPinMetric(preferences.pinnedMetrics, kind)} onChange={() => toggleMetric(kind)} /><span>{kind === "session" ? text.session : text.weekly}</span></label>)}</fieldset>
       <div className="settings-group diagnostics">
         <h2>{text.privacy}</h2><p>{text.diagnosticsDescription}</p>

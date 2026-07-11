@@ -10,6 +10,9 @@ mod tray_interaction;
 mod tray_presentation;
 mod windows_backdrop;
 
+#[cfg(test)]
+mod accessibility;
+
 use std::{
     fs,
     sync::{Arc, Mutex},
