@@ -34,7 +34,7 @@ impl Default for MonitorPreferences {
             theme: Theme::Dark,
             language: Language::En,
             start_with_windows: false,
-            pinned_metrics: Vec::new(),
+            pinned_metrics: vec![MetricKind::Session, MetricKind::Cycle],
             alert_thresholds: vec![80, 95],
         }
     }
@@ -133,14 +133,14 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_english_dark_and_standard_thresholds() {
+    fn defaults_to_english_dark_standard_thresholds_and_the_two_primary_limits() {
         assert_eq!(
             MonitorPreferences::default(),
             MonitorPreferences {
                 theme: Theme::Dark,
                 language: Language::En,
                 start_with_windows: false,
-                pinned_metrics: vec![],
+                pinned_metrics: vec![MetricKind::Session, MetricKind::Cycle],
                 alert_thresholds: vec![80, 95]
             }
         );

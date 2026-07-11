@@ -5,14 +5,14 @@ mod diagnostics;
 mod monitor_controls;
 mod popup_position;
 mod spend;
+mod tray_icons;
+mod tray_interaction;
 mod tray_presentation;
 mod windows_backdrop;
 
 use std::{
     fs,
     sync::{Arc, Mutex},
-    thread,
-    time::Duration,
 };
 
 use core::{sanitize_for_frontend, ProviderId, UsageSnapshot};
@@ -27,6 +27,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_notification::NotificationExt;
+use tray_interaction::{PanelAction, TrayClickTracker};
 use tray_presentation::{build_tray_presentation, TrayPresentationTracker};
 
 #[tauri::command]
@@ -89,6 +90,7 @@ struct AppState {
     backdrop: Mutex<windows_backdrop::BackdropMode>,
     last_tray_rect: Mutex<Option<popup_position::PhysicalRect>>,
     tray_presentation: Mutex<TrayPresentationTracker>,
+    tray_click: Mutex<TrayClickTracker>,
     spend_scanner: Arc<Mutex<SpendScanner>>,
 }
 
@@ -136,7 +138,18 @@ fn update_tray_presentation(
     };
     let next = build_tray_presentation(snapshots, preferences);
     if let Ok(mut tracker) = app.state::<AppState>().tray_presentation.lock() {
-        let _ = tracker.apply_tooltip_if_changed(&next, |tooltip| tray.set_tooltip(Some(tooltip)));
+        if tracker
+            .apply_icon_if_changed(&next, |key| tray.set_icon(Some(tray_icons::image_for(key))))
+            .is_err()
+        {
+            core::log_redacted("QuotaBuddy tray icon update failed");
+        }
+        if tracker
+            .apply_tooltip_if_changed(&next, |tooltip| tray.set_tooltip(Some(tooltip)))
+            .is_err()
+        {
+            core::log_redacted("QuotaBuddy tray tooltip update failed");
+        }
     }
 }
 
@@ -235,9 +248,7 @@ fn get_window_backdrop(state: tauri::State<'_, AppState>) -> windows_backdrop::B
 
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
+    hide_main_window_handle(&app);
 }
 
 fn remember_tray_rect(app: &tauri::AppHandle, rect: tauri::Rect) -> popup_position::PhysicalRect {
@@ -262,6 +273,12 @@ fn last_tray_rect(app: &tauri::AppHandle) -> Option<popup_position::PhysicalRect
         .lock()
         .ok()
         .and_then(|rect| *rect)
+}
+
+fn live_tray_rect(app: &tauri::AppHandle) -> Option<popup_position::PhysicalRect> {
+    let tray = app.tray_by_id("quotabuddy-tray")?;
+    let rect = tray.rect().ok().flatten()?;
+    Some(remember_tray_rect(app, rect))
 }
 
 fn apply_window_backdrop(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
@@ -330,7 +347,10 @@ fn position_main_window(
 
 fn show_main_window(app: &tauri::AppHandle, tray_rect: Option<popup_position::PhysicalRect>) {
     if let Some(window) = app.get_webview_window("main") {
-        if let Some(rect) = tray_rect.or_else(|| last_tray_rect(app)) {
+        if let Some(rect) = tray_rect
+            .or_else(|| live_tray_rect(app))
+            .or_else(|| last_tray_rect(app))
+        {
             let _ = position_main_window(&window, rect);
         }
         apply_window_backdrop(app, &window);
@@ -340,13 +360,49 @@ fn show_main_window(app: &tauri::AppHandle, tray_rect: Option<popup_position::Ph
     }
 }
 
-fn toggle_main_window(app: &tauri::AppHandle, tray_rect: popup_position::PhysicalRect) {
-    if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) {
-            let _ = window.hide();
-        } else {
-            show_main_window(app, Some(tray_rect));
+fn main_window_is_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn handle_left_tray_button(
+    app: &tauri::AppHandle,
+    button_state: MouseButtonState,
+    tray_rect: popup_position::PhysicalRect,
+) {
+    let visible = main_window_is_visible(app);
+    let state = app.state::<AppState>();
+    match button_state {
+        MouseButtonState::Down => {
+            if let Ok(mut tracker) = state.tray_click.lock() {
+                tracker.left_down(visible);
+            }
         }
+        MouseButtonState::Up => {
+            let action = state
+                .tray_click
+                .lock()
+                .map(|mut tracker| tracker.left_up(visible))
+                .unwrap_or(if visible {
+                    PanelAction::Hide
+                } else {
+                    PanelAction::Show
+                });
+            if action == PanelAction::Hide {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            } else {
+                show_main_window(app, Some(tray_rect));
+            }
+        }
+    }
+}
+
+fn hide_main_window_handle(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
     }
 }
 
@@ -360,6 +416,7 @@ pub fn run() {
             backdrop: Mutex::new(windows_backdrop::BackdropMode::Solid),
             last_tray_rect: Mutex::new(None),
             tray_presentation: Mutex::new(TrayPresentationTracker::default()),
+            tray_click: Mutex::new(TrayClickTracker::default()),
             spend_scanner: Arc::new(Mutex::new(SpendScanner::default())),
         })
         .plugin(tauri_plugin_autostart::init(
@@ -369,6 +426,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let preferences = load_preferences(app.handle());
+            let initial_tray_presentation = build_tray_presentation(&[], &preferences);
             if let Some(window) = app.get_webview_window("main") {
                 apply_window_backdrop(app.handle(), &window);
             }
@@ -377,21 +435,17 @@ pub fn run() {
             }
             if let Some(state) = app.try_state::<AppState>() {
                 if let Ok(mut stored) = state.preferences.lock() {
-                    *stored = preferences;
+                    *stored = preferences.clone();
                 }
             }
-            let handle = app.handle().clone();
-            thread::spawn(move || loop {
-                thread::sleep(Duration::from_secs(5 * 60));
-                let _ = refresh_usage(&handle);
-            });
             core::log_redacted("QuotaBuddy native shell initialized");
             let open = MenuItem::with_id(app, "open", "Open QuotaBuddy", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
 
             let _tray = TrayIconBuilder::with_id("quotabuddy-tray")
-                .tooltip("QuotaBuddy — local usage monitor")
+                .icon(tray_icons::image_for(initial_tray_presentation.icon_key))
+                .tooltip(&initial_tray_presentation.tooltip)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -408,13 +462,18 @@ pub fn run() {
                     } = event
                     {
                         let rect = remember_tray_rect(tray.app_handle(), rect);
-                        if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                            toggle_main_window(tray.app_handle(), rect);
+                        if button == MouseButton::Left {
+                            handle_left_tray_button(tray.app_handle(), button_state, rect);
                         }
                     }
                 })
                 .build(app)?;
 
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut tracker) = state.tray_presentation.lock() {
+                    tracker.confirm_applied(&initial_tray_presentation);
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
