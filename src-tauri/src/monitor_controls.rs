@@ -122,6 +122,7 @@ mod tests {
                 remaining: None,
                 total: None,
                 is_estimate: false,
+                reset: None,
             }],
             reset: None,
             last_successful_refresh_at: None,

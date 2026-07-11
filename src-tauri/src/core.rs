@@ -40,6 +40,8 @@ pub struct UsageMetric {
     pub remaining: Option<String>,
     pub total: Option<String>,
     pub is_estimate: bool,
+    #[serde(default)]
+    pub reset: Option<ResetMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -88,6 +90,10 @@ pub fn sanitize_for_frontend(mut snapshot: UsageSnapshot) -> UsageSnapshot {
         metric.label = redact_sensitive_text(&metric.label);
         metric.remaining = metric.remaining.as_deref().map(redact_sensitive_text);
         metric.total = metric.total.as_deref().map(redact_sensitive_text);
+        if let Some(reset) = &mut metric.reset {
+            reset.resets_at = redact_sensitive_text(&reset.resets_at);
+            reset.label = redact_sensitive_text(&reset.label);
+        }
     }
 
     if let Some(reset) = &mut snapshot.reset {
@@ -173,6 +179,10 @@ mod tests {
                 remaining: Some("Bearer remaining-secret".to_owned()),
                 total: None,
                 is_estimate: false,
+                reset: Some(ResetMetadata {
+                    resets_at: "token=reset-secret".to_owned(),
+                    label: "Bearer reset-label-secret".to_owned(),
+                }),
             }],
             reset: None,
             last_successful_refresh_at: None,
@@ -190,6 +200,8 @@ mod tests {
         for secret in [
             "metric-secret",
             "remaining-secret",
+            "reset-secret",
+            "reset-label-secret",
             "error-secret",
             "message-secret",
         ] {

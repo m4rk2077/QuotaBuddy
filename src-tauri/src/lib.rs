@@ -8,12 +8,17 @@ mod spend;
 mod tray_presentation;
 mod windows_backdrop;
 
-use std::{fs, sync::Mutex, thread, time::Duration};
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 use core::{sanitize_for_frontend, ProviderId, UsageSnapshot};
 use diagnostics::write_diagnostic_export;
 use monitor_controls::{crossing_alerts, validate_preferences, AlertTracker, MonitorPreferences};
-use spend::{bundled_pricing_table, estimate_spend, read_usage_records, SpendEstimate};
+use spend::{bundled_pricing_table, estimate_spend, SpendEstimate, SpendScanner};
 use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -25,8 +30,10 @@ use tauri_plugin_notification::NotificationExt;
 use tray_presentation::{build_tray_presentation, TrayPresentationTracker};
 
 #[tauri::command]
-fn get_usage_snapshots(app: tauri::AppHandle) -> Vec<UsageSnapshot> {
-    refresh_usage(&app)
+async fn get_usage_snapshots(app: tauri::AppHandle) -> Result<Vec<UsageSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || refresh_usage(&app))
+        .await
+        .map_err(|_| "Usage refresh task failed.".to_owned())
 }
 
 fn refresh_usage(app: &tauri::AppHandle) -> Vec<UsageSnapshot> {
@@ -82,6 +89,7 @@ struct AppState {
     backdrop: Mutex<windows_backdrop::BackdropMode>,
     last_tray_rect: Mutex<Option<popup_position::PhysicalRect>>,
     tray_presentation: Mutex<TrayPresentationTracker>,
+    spend_scanner: Arc<Mutex<SpendScanner>>,
 }
 
 fn preferences_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -171,30 +179,53 @@ fn codex_log_directory() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".codex").join("sessions"))
 }
 
-fn local_spend_estimate() -> Result<SpendEstimate, String> {
+fn local_spend_estimate(scanner: &mut SpendScanner) -> Result<SpendEstimate, String> {
     let records = match codex_log_directory() {
-        Some(path) => read_usage_records(&path).map_err(|error| error.to_string())?,
+        Some(path) => scanner
+            .read_usage_records(&path)
+            .map_err(|error| error.to_string())?,
         None => Vec::new(),
     };
     Ok(estimate_spend(&records, &bundled_pricing_table()))
 }
 
 #[tauri::command]
-fn get_local_spend_estimate() -> Result<SpendEstimate, String> {
-    local_spend_estimate()
+async fn get_local_spend_estimate(
+    state: tauri::State<'_, AppState>,
+) -> Result<SpendEstimate, String> {
+    let scanner = Arc::clone(&state.spend_scanner);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut scanner = scanner
+            .lock()
+            .map_err(|_| "Spend estimate is unavailable.".to_owned())?;
+        local_spend_estimate(&mut scanner)
+    })
+    .await
+    .map_err(|_| "Spend estimate task failed.".to_owned())?
 }
 
 #[tauri::command]
-fn export_redacted_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
+async fn export_redacted_diagnostics(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
     let directory = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let destination = directory.join("quotabuddy-diagnostics-redacted.json");
-    write_diagnostic_export(&destination, local_spend_estimate()?)
-        .map_err(|error| error.to_string())?;
-    Ok(destination.display().to_string())
+    let scanner = Arc::clone(&state.spend_scanner);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut scanner = scanner
+            .lock()
+            .map_err(|_| "Diagnostics are unavailable.".to_owned())?;
+        write_diagnostic_export(&destination, local_spend_estimate(&mut scanner)?)
+            .map_err(|error| error.to_string())?;
+        Ok(destination.display().to_string())
+    })
+    .await
+    .map_err(|_| "Diagnostics task failed.".to_owned())?
 }
 
 #[tauri::command]
@@ -329,6 +360,7 @@ pub fn run() {
             backdrop: Mutex::new(windows_backdrop::BackdropMode::Solid),
             last_tray_rect: Mutex::new(None),
             tray_presentation: Mutex::new(TrayPresentationTracker::default()),
+            spend_scanner: Arc::new(Mutex::new(SpendScanner::default())),
         })
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -350,8 +382,8 @@ pub fn run() {
             }
             let handle = app.handle().clone();
             thread::spawn(move || loop {
-                let _ = refresh_usage(&handle);
                 thread::sleep(Duration::from_secs(5 * 60));
+                let _ = refresh_usage(&handle);
             });
             core::log_redacted("QuotaBuddy native shell initialized");
             let open = MenuItem::with_id(app, "open", "Open QuotaBuddy", true, None::<&str>)?;

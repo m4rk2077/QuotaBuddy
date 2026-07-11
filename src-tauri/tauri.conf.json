@@ -13,10 +13,12 @@
     "windows": [
       {
         "title": "QuotaBuddy",
-        "width": 960,
-        "height": 680,
-        "minWidth": 580,
-        "minHeight": 480,
+        "width": 400,
+        "height": 560,
+        "minWidth": 400,
+        "minHeight": 560,
+        "maxWidth": 400,
+        "maxHeight": 560,
         "visible": false,
         "decorations": false,
         "resizable": false,

@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::Path};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{self, BufRead, BufReader},
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PricingTable {
@@ -37,79 +43,135 @@ pub fn bundled_pricing_table() -> PricingTable {
 }
 
 pub fn estimate_spend(records: &[CodexUsageRecord], prices: &PricingTable) -> SpendEstimate {
-    let priced_records: Vec<_> = records
-        .iter()
-        .filter_map(|record| {
-            prices
-                .models
-                .iter()
-                .find(|price| price.model == record.model)
-                .map(|price| (record, price))
-        })
-        .collect();
-    let amount_usd = priced_records
-        .iter()
-        .map(|(record, price)| {
-            (record.input_tokens as f64 / 1_000_000.0) * price.input_per_million_usd
-                + (record.output_tokens as f64 / 1_000_000.0) * price.output_per_million_usd
-        })
-        .sum::<f64>();
+    let (amount_usd, record_count) = records.iter().fold((0.0, 0), |acc, record| {
+        let Some(price) = prices
+            .models
+            .iter()
+            .find(|price| price.model == record.model)
+        else {
+            return acc;
+        };
+        (
+            acc.0
+                + (record.input_tokens as f64 / 1_000_000.0) * price.input_per_million_usd
+                + (record.output_tokens as f64 / 1_000_000.0) * price.output_per_million_usd,
+            acc.1 + 1,
+        )
+    });
 
     SpendEstimate {
         amount_usd: (amount_usd * 100_000.0).round() / 100_000.0,
         pricing_table_version: prices.version.clone(),
-        record_count: priced_records.len(),
+        record_count,
         is_estimate: true,
         label: "Estimated local Codex spend (not billing)".to_owned(),
     }
 }
 
-pub fn read_usage_records(directory: &Path) -> io::Result<Vec<CodexUsageRecord>> {
-    let mut records = Vec::new();
-    if !directory.exists() {
-        return Ok(records);
-    }
-
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            records.extend(read_usage_records(&entry.path())?);
-            continue;
-        }
-        if entry
-            .path()
-            .extension()
-            .and_then(|extension| extension.to_str())
-            != Some("jsonl")
-        {
-            continue;
-        }
-        let content = fs::read_to_string(entry.path())?;
-        records.extend(parse_session_usage(&content));
-    }
-    Ok(records)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    length: u64,
+    modified: Option<SystemTime>,
 }
 
-fn parse_session_usage(content: &str) -> Vec<CodexUsageRecord> {
-    let values: Vec<_> = content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .collect();
-    let model = values.iter().find_map(find_model);
-    let (mut input_tokens, mut output_tokens) = (0, 0);
-    for value in &values {
-        collect_token_totals(value, &mut input_tokens, &mut output_tokens);
+#[derive(Debug, Clone)]
+struct CachedSession {
+    fingerprint: FileFingerprint,
+    record: Option<CodexUsageRecord>,
+}
+
+#[derive(Default)]
+pub struct SpendScanner {
+    cache: HashMap<PathBuf, CachedSession>,
+    #[cfg(test)]
+    parsed_file_count: usize,
+}
+
+impl SpendScanner {
+    pub fn read_usage_records(&mut self, directory: &Path) -> io::Result<Vec<CodexUsageRecord>> {
+        if !directory.exists() {
+            self.cache.clear();
+            return Ok(Vec::new());
+        }
+        let mut next_cache = HashMap::new();
+        let mut records = Vec::new();
+        self.scan_directory(directory, &mut next_cache, &mut records)?;
+        self.cache = next_cache;
+        Ok(records)
     }
-    match (model, input_tokens, output_tokens) {
+
+    fn scan_directory(
+        &mut self,
+        directory: &Path,
+        next_cache: &mut HashMap<PathBuf, CachedSession>,
+        records: &mut Vec<CodexUsageRecord>,
+    ) -> io::Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                self.scan_directory(&entry.path(), next_cache, records)?;
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let metadata = entry.metadata()?;
+            let fingerprint = FileFingerprint {
+                length: metadata.len(),
+                modified: metadata.modified().ok(),
+            };
+            let cached = self
+                .cache
+                .get(&path)
+                .filter(|cached| cached.fingerprint == fingerprint)
+                .cloned();
+            let session = match cached {
+                Some(cached) => cached,
+                None => {
+                    let record = parse_session_usage_reader(BufReader::new(File::open(&path)?))?;
+                    #[cfg(test)]
+                    {
+                        self.parsed_file_count += 1;
+                    }
+                    CachedSession {
+                        fingerprint,
+                        record,
+                    }
+                }
+            };
+            if let Some(record) = &session.record {
+                records.push(record.clone());
+            }
+            next_cache.insert(path, session);
+        }
+        Ok(())
+    }
+}
+
+fn parse_session_usage_reader(reader: impl BufRead) -> io::Result<Option<CodexUsageRecord>> {
+    let mut model = None;
+    let (mut input_tokens, mut output_tokens) = (0, 0);
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if model.is_none() {
+            model = find_model(&value);
+        }
+        collect_token_totals(&value, &mut input_tokens, &mut output_tokens);
+    }
+    Ok(match (model, input_tokens, output_tokens) {
         (Some(model), input_tokens, output_tokens) if input_tokens > 0 || output_tokens > 0 => {
-            vec![CodexUsageRecord {
+            Some(CodexUsageRecord {
                 model,
                 input_tokens,
                 output_tokens,
-            }]
+            })
         }
-        _ => Vec::new(),
-    }
+        _ => None,
+    })
 }
 
 fn find_model(value: &serde_json::Value) -> Option<String> {
@@ -152,52 +214,13 @@ fn collect_token_totals(value: &serde_json::Value, input: &mut u64, output: &mut
     }
 }
 
-#[allow(dead_code)]
-fn parse_usage_records(line: &str) -> Vec<CodexUsageRecord> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return Vec::new();
-    };
-    let mut records = Vec::new();
-    collect_usage_records(&value, &mut records);
-    records
-}
-
-#[allow(dead_code)]
-fn collect_usage_records(value: &serde_json::Value, records: &mut Vec<CodexUsageRecord>) {
-    match value {
-        serde_json::Value::Object(object) => {
-            let model = object.get("model").and_then(serde_json::Value::as_str);
-            let input_tokens = object
-                .get("input_tokens")
-                .and_then(serde_json::Value::as_u64);
-            let output_tokens = object
-                .get("output_tokens")
-                .and_then(serde_json::Value::as_u64);
-            if let (Some(model), Some(input_tokens), Some(output_tokens)) =
-                (model, input_tokens, output_tokens)
-            {
-                records.push(CodexUsageRecord {
-                    model: model.to_owned(),
-                    input_tokens,
-                    output_tokens,
-                });
-            }
-            for child in object.values() {
-                collect_usage_records(child, records);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for child in values {
-                collect_usage_records(child, records);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::Cursor,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn calculates_explicitly_labeled_estimate_from_anonymized_local_fixture() {
@@ -215,10 +238,66 @@ mod tests {
 
     #[test]
     fn reads_usage_nested_in_anonymized_jsonl_log_records() {
-        let records = parse_session_usage("{\"type\":\"session_meta\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n{\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"output_tokens\":1000}}}}\n{\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5000,\"output_tokens\":2000}}}}");
+        let record = parse_session_usage_reader(Cursor::new("{\"type\":\"session_meta\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n{\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"output_tokens\":1000}}}}\n{\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5000,\"output_tokens\":2000}}}}"))
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].model, "gpt-5-codex");
-        assert_eq!(records[0].input_tokens, 5000);
+        assert_eq!(record.model, "gpt-5-codex");
+        assert_eq!(record.input_tokens, 5000);
+    }
+
+    #[test]
+    fn streaming_parser_matches_session_record_semantics() {
+        let content = "{\"type\":\"session_meta\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n{malformed}\n{\"payload\":{\"input_tokens\":3000,\"output_tokens\":1000}}\n{\"payload\":{\"input_tokens\":5000,\"output_tokens\":2000}}\n";
+
+        let record = parse_session_usage_reader(Cursor::new(content)).expect("stream parses");
+
+        assert_eq!(
+            record,
+            Some(CodexUsageRecord {
+                model: "gpt-5-codex".to_owned(),
+                input_tokens: 5000,
+                output_tokens: 2000,
+            })
+        );
+    }
+
+    #[test]
+    fn scanner_reuses_unchanged_files_and_reparses_changed_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("quotabuddy-spend-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        let session = directory.join("session.jsonl");
+        fs::write(
+            &session,
+            "{\"model\":\"gpt-5-codex\"}\n{\"input_tokens\":100,\"output_tokens\":20}\n",
+        )
+        .unwrap();
+        let mut scanner = SpendScanner::default();
+
+        let first = scanner.read_usage_records(&directory).unwrap();
+        let parsed_after_first = scanner.parsed_file_count;
+        let second = scanner.read_usage_records(&directory).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(scanner.parsed_file_count, parsed_after_first);
+
+        fs::write(
+            &session,
+            "{\"model\":\"gpt-5-codex\"}\n{\"input_tokens\":2500,\"output_tokens\":400}\n",
+        )
+        .unwrap();
+        let changed = scanner.read_usage_records(&directory).unwrap();
+
+        assert_eq!(scanner.parsed_file_count, parsed_after_first + 1);
+        assert_eq!(changed[0].input_tokens, 2500);
+
+        fs::remove_file(&session).unwrap();
+        assert!(scanner.read_usage_records(&directory).unwrap().is_empty());
+        assert!(scanner.cache.is_empty());
+        fs::remove_dir_all(directory).unwrap();
     }
 }
