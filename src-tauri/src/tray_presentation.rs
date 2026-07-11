@@ -10,6 +10,7 @@ pub enum TraySeverity {
     Healthy,
     Warning,
     Critical,
+    Stale,
     Unavailable,
 }
 
@@ -18,6 +19,7 @@ pub enum TrayIconKey {
     Healthy,
     Warning,
     Critical,
+    Stale,
     Unavailable,
 }
 
@@ -39,24 +41,27 @@ pub fn build_tray_presentation(
         return unavailable_presentation(preferences.language);
     };
 
-    let severity =
-        if snapshot.status != SnapshotStatus::Healthy || !snapshot.availability.usage_available {
-            TraySeverity::Unavailable
-        } else {
-            snapshot
-                .metrics
-                .iter()
-                .filter_map(|metric| metric.used_percentage)
-                .filter(|used| used.is_finite())
-                .fold(
-                    if snapshot.is_stale {
-                        TraySeverity::Warning
-                    } else {
-                        TraySeverity::Healthy
-                    },
-                    |severity, used| severity.max(usage_severity(used)),
-                )
-        };
+    let has_normalized_metric = snapshot
+        .metrics
+        .iter()
+        .any(|metric| metric.used_percentage.is_some_and(|used| used.is_finite()));
+    let severity = if snapshot.is_stale
+        && snapshot.status == SnapshotStatus::Failed
+        && has_normalized_metric
+    {
+        TraySeverity::Stale
+    } else if snapshot.status != SnapshotStatus::Healthy || !snapshot.availability.usage_available {
+        TraySeverity::Unavailable
+    } else {
+        snapshot
+            .metrics
+            .iter()
+            .filter_map(|metric| metric.used_percentage)
+            .filter(|used| used.is_finite())
+            .fold(TraySeverity::Healthy, |severity, used| {
+                severity.max(usage_severity(used, &preferences.alert_thresholds))
+            })
+    };
 
     let mut kinds = Vec::new();
     for kind in &preferences.pinned_metrics {
@@ -86,15 +91,25 @@ pub fn build_tray_presentation(
         })
         .collect();
 
-    let fallback = localized_fallback(preferences.language);
-    let tooltip = limit_chars(
-        if metrics.is_empty() {
-            fallback
-        } else {
-            metrics.join(" • ")
-        },
-        MAX_TOOLTIP_CHARS,
-    );
+    let fallback = if severity == TraySeverity::Unavailable {
+        localized_unavailable(preferences.language).to_owned()
+    } else {
+        localized_fallback(preferences.language)
+    };
+    let has_metrics = !metrics.is_empty();
+    let mut tooltip = if !has_metrics {
+        fallback
+    } else {
+        metrics.join(" • ")
+    };
+    if severity == TraySeverity::Stale {
+        tooltip.push_str(" • ");
+        tooltip.push_str(localized_stale(preferences.language));
+    } else if severity == TraySeverity::Unavailable && has_metrics {
+        tooltip.push_str(" • ");
+        tooltip.push_str(localized_unavailable_marker(preferences.language));
+    }
+    let tooltip = limit_chars(tooltip, MAX_TOOLTIP_CHARS);
     let icon_key = severity.into();
 
     TrayPresentation {
@@ -107,12 +122,15 @@ pub fn build_tray_presentation(
 #[derive(Default)]
 pub struct TrayPresentationTracker {
     last_tooltip: Option<String>,
-    // Consumed by #21 when icon-key-to-image mapping is wired to Tauri.
-    #[allow(dead_code)]
     last_icon_key: Option<TrayIconKey>,
 }
 
 impl TrayPresentationTracker {
+    pub fn confirm_applied(&mut self, presentation: &TrayPresentation) {
+        self.last_tooltip = Some(presentation.tooltip.clone());
+        self.last_icon_key = Some(presentation.icon_key);
+    }
+
     pub fn apply_tooltip_if_changed<E, F>(
         &mut self,
         next: &TrayPresentation,
@@ -129,7 +147,6 @@ impl TrayPresentationTracker {
         Ok(true)
     }
 
-    #[allow(dead_code)]
     pub fn apply_icon_if_changed<E, F>(
         &mut self,
         next: &TrayPresentation,
@@ -161,7 +178,8 @@ impl TraySeverity {
             Self::Healthy => 0,
             Self::Warning => 1,
             Self::Critical => 2,
-            Self::Unavailable => 3,
+            Self::Stale => 3,
+            Self::Unavailable => 4,
         }
     }
 }
@@ -172,15 +190,21 @@ impl From<TraySeverity> for TrayIconKey {
             TraySeverity::Healthy => Self::Healthy,
             TraySeverity::Warning => Self::Warning,
             TraySeverity::Critical => Self::Critical,
+            TraySeverity::Stale => Self::Stale,
             TraySeverity::Unavailable => Self::Unavailable,
         }
     }
 }
 
-fn usage_severity(used: f64) -> TraySeverity {
-    if used >= 95.0 {
+fn usage_severity(used: f64, thresholds: &[u8]) -> TraySeverity {
+    let mut thresholds = thresholds.to_vec();
+    thresholds.sort_unstable();
+    let warning = f64::from(thresholds.first().copied().unwrap_or(80));
+    let critical = f64::from(thresholds.get(1).copied().unwrap_or(95));
+
+    if used >= critical {
         TraySeverity::Critical
-    } else if used >= 80.0 {
+    } else if used >= warning {
         TraySeverity::Warning
     } else {
         TraySeverity::Healthy
@@ -206,10 +230,31 @@ fn localized_fallback(language: Language) -> String {
     }
 }
 
+fn localized_stale(language: Language) -> &'static str {
+    match language {
+        Language::En => "stale",
+        Language::PtBr => "desatualizado",
+    }
+}
+
+fn localized_unavailable(language: Language) -> &'static str {
+    match language {
+        Language::En => "QuotaBuddy — usage unavailable",
+        Language::PtBr => "QuotaBuddy — uso indisponível",
+    }
+}
+
+fn localized_unavailable_marker(language: Language) -> &'static str {
+    match language {
+        Language::En => "unavailable",
+        Language::PtBr => "indisponível",
+    }
+}
+
 fn unavailable_presentation(language: Language) -> TrayPresentation {
     TrayPresentation {
         severity: TraySeverity::Unavailable,
-        tooltip: localized_fallback(language),
+        tooltip: localized_unavailable(language).to_owned(),
         icon_key: TrayIconKey::Unavailable,
     }
 }
@@ -370,6 +415,102 @@ mod tests {
     }
 
     #[test]
+    fn presents_cached_transient_failures_as_stale_without_hiding_the_metrics() {
+        let mut stale = snapshot(
+            SnapshotStatus::Failed,
+            vec![
+                metric(MetricKind::Session, Some(28.0), "ignored"),
+                metric(MetricKind::Cycle, Some(57.0), "ignored"),
+            ],
+        );
+        stale.is_stale = true;
+
+        let presentation = build_tray_presentation(&[stale], &preferences(Language::PtBr));
+
+        assert_eq!(presentation.severity, TraySeverity::Stale);
+        assert_eq!(presentation.icon_key, TrayIconKey::Stale);
+        assert_eq!(
+            presentation.tooltip,
+            "Sessão 72% • Semana 43% • desatualizado"
+        );
+    }
+
+    #[test]
+    fn derives_warning_and_critical_icons_from_configured_thresholds() {
+        let mut configured = preferences(Language::En);
+        configured.alert_thresholds = vec![50, 75];
+
+        let warning = build_tray_presentation(
+            &[snapshot(
+                SnapshotStatus::Healthy,
+                vec![metric(MetricKind::Session, Some(60.0), "ignored")],
+            )],
+            &configured,
+        );
+        let critical = build_tray_presentation(
+            &[snapshot(
+                SnapshotStatus::Healthy,
+                vec![metric(MetricKind::Session, Some(80.0), "ignored")],
+            )],
+            &configured,
+        );
+
+        assert_eq!(warning.icon_key, TrayIconKey::Warning);
+        assert_eq!(critical.icon_key, TrayIconKey::Critical);
+    }
+
+    #[test]
+    fn does_not_claim_stale_data_when_no_normalized_cached_metric_exists() {
+        let mut failed = snapshot(
+            SnapshotStatus::Failed,
+            vec![metric(MetricKind::Session, None, "ignored")],
+        );
+        failed.is_stale = true;
+
+        let presentation = build_tray_presentation(&[failed], &preferences(Language::En));
+
+        assert_eq!(presentation.severity, TraySeverity::Unavailable);
+        assert_eq!(presentation.icon_key, TrayIconKey::Unavailable);
+    }
+
+    #[test]
+    fn keeps_reauthentication_more_urgent_than_cached_stale_data() {
+        let mut reauth = snapshot(
+            SnapshotStatus::ReauthRequired,
+            vec![metric(MetricKind::Session, Some(28.0), "ignored")],
+        );
+        reauth.is_stale = true;
+
+        let presentation = build_tray_presentation(&[reauth], &preferences(Language::En));
+
+        assert_eq!(presentation.severity, TraySeverity::Unavailable);
+        assert_eq!(presentation.icon_key, TrayIconKey::Unavailable);
+        assert_eq!(presentation.tooltip, "Session 72% • unavailable");
+    }
+
+    #[test]
+    fn keeps_unavailable_failures_unavailable_even_when_cache_is_present() {
+        let mut unavailable = snapshot(
+            SnapshotStatus::Unavailable,
+            vec![metric(MetricKind::Session, Some(28.0), "ignored")],
+        );
+        unavailable.is_stale = true;
+
+        let presentation = build_tray_presentation(&[unavailable], &preferences(Language::En));
+
+        assert_eq!(presentation.severity, TraySeverity::Unavailable);
+        assert_eq!(presentation.icon_key, TrayIconKey::Unavailable);
+        assert_eq!(presentation.tooltip, "Session 72% • unavailable");
+    }
+
+    #[test]
+    fn announces_unavailability_in_the_localized_tooltip() {
+        let presentation = build_tray_presentation(&[], &preferences(Language::PtBr));
+
+        assert_eq!(presentation.tooltip, "QuotaBuddy — uso indisponível");
+    }
+
+    #[test]
     fn suppresses_tooltip_and_icon_updates_independently() {
         let presentation = TrayPresentation {
             severity: TraySeverity::Healthy,
@@ -417,6 +558,46 @@ mod tests {
         );
         assert_eq!(
             tracker.apply_tooltip_if_changed(&presentation, |_| Ok::<_, &str>(())),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn confirms_only_the_builder_state_that_was_successfully_created() {
+        let presentation = TrayPresentation {
+            severity: TraySeverity::Unavailable,
+            tooltip: "QuotaBuddy — local usage monitor".to_owned(),
+            icon_key: TrayIconKey::Unavailable,
+        };
+        let mut tracker = TrayPresentationTracker::default();
+
+        tracker.confirm_applied(&presentation);
+
+        assert_eq!(
+            tracker.apply_tooltip_if_changed(&presentation, |_| panic!("tooltip was duplicated")),
+            Ok::<_, ()>(false)
+        );
+        assert_eq!(
+            tracker.apply_icon_if_changed(&presentation, |_| panic!("icon was duplicated")),
+            Ok::<_, ()>(false)
+        );
+    }
+
+    #[test]
+    fn retries_an_icon_update_that_failed_at_the_tray_boundary() {
+        let presentation = TrayPresentation {
+            severity: TraySeverity::Critical,
+            tooltip: "Session 2%".to_owned(),
+            icon_key: TrayIconKey::Critical,
+        };
+        let mut tracker = TrayPresentationTracker::default();
+
+        assert_eq!(
+            tracker.apply_icon_if_changed(&presentation, |_| Err("tray unavailable")),
+            Err("tray unavailable")
+        );
+        assert_eq!(
+            tracker.apply_icon_if_changed(&presentation, |_| Ok::<_, &str>(())),
             Ok(true)
         );
     }

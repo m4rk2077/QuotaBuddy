@@ -301,4 +301,134 @@ mod tests {
             PhysicalPoint { x: 1320, y: 200 }
         );
     }
+
+    #[test]
+    fn positions_the_compact_panel_on_every_taskbar_edge_from_100_to_200_percent() {
+        let cases = [
+            (
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1040,
+                },
+                PhysicalRect {
+                    x: 1800,
+                    y: 1040,
+                    width: 24,
+                    height: 40,
+                },
+                1.0,
+                PhysicalPoint { x: 1520, y: 480 },
+            ),
+            (
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 2400,
+                    height: 1350,
+                },
+                PhysicalRect {
+                    x: 0,
+                    y: 50,
+                    width: 2400,
+                    height: 1300,
+                },
+                PhysicalRect {
+                    x: 1185,
+                    y: 0,
+                    width: 30,
+                    height: 50,
+                },
+                1.25,
+                PhysicalPoint { x: 950, y: 50 },
+            ),
+            (
+                PhysicalRect {
+                    x: -2880,
+                    y: 0,
+                    width: 2880,
+                    height: 1620,
+                },
+                PhysicalRect {
+                    x: -2820,
+                    y: 0,
+                    width: 2820,
+                    height: 1620,
+                },
+                PhysicalRect {
+                    x: -2880,
+                    y: 700,
+                    width: 60,
+                    height: 36,
+                },
+                1.5,
+                PhysicalPoint { x: -2820, y: 298 },
+            ),
+            (
+                PhysicalRect {
+                    x: 0,
+                    y: -2160,
+                    width: 3840,
+                    height: 2160,
+                },
+                PhysicalRect {
+                    x: 0,
+                    y: -2160,
+                    width: 3760,
+                    height: 2160,
+                },
+                PhysicalRect {
+                    x: 3760,
+                    y: -1200,
+                    width: 80,
+                    height: 48,
+                },
+                2.0,
+                PhysicalPoint { x: 2960, y: -1736 },
+            ),
+        ];
+
+        for (monitor, work_area, tray, scale, expected) in cases {
+            assert_eq!(
+                calculate_popup_position(monitor, work_area, tray, (400, 560), scale),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn infers_the_taskbar_edge_from_the_icon_when_auto_hide_uses_the_full_work_area() {
+        assert_eq!(
+            calculate_popup_position(
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                PhysicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                PhysicalRect {
+                    x: 1700,
+                    y: 1056,
+                    width: 24,
+                    height: 24,
+                },
+                (400, 560),
+                1.0,
+            ),
+            PhysicalPoint { x: 1512, y: 496 }
+        );
+    }
 }

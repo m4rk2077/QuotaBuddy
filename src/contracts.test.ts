@@ -25,7 +25,12 @@ describe("UsageSnapshot frontend boundary", () => {
 
 describe("monitor controls external behavior", () => {
   it("defaults to English, dark theme, and 80%/95% alerts", () => {
-    expect(defaultMonitorPreferences).toMatchObject({ language: "en", theme: "dark", alertThresholds: [80, 95] });
+    expect(defaultMonitorPreferences).toMatchObject({
+      language: "en",
+      theme: "dark",
+      pinnedMetrics: ["session", "cycle"],
+      alertThresholds: [80, 95],
+    });
   });
 
   it("allows no more than two pinned tray metrics", () => {

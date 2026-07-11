@@ -16,7 +16,7 @@ export const defaultMonitorPreferences: MonitorPreferences = {
   theme: "dark",
   language: "en",
   startWithWindows: false,
-  pinnedMetrics: [],
+  pinnedMetrics: ["session", "cycle"],
   alertThresholds: [80, 95],
 };
 
