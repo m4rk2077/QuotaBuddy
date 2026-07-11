@@ -62,15 +62,19 @@ fn render_rgba(key: TrayIconKey) -> Vec<u8> {
                 }
             }
 
-            if alpha_sum == 0 {
-                pixels.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
+            if let (Some(red), Some(green), Some(blue)) = (
+                red_sum.checked_div(alpha_sum),
+                green_sum.checked_div(alpha_sum),
+                blue_sum.checked_div(alpha_sum),
+            ) {
                 pixels.extend_from_slice(&[
-                    (red_sum / alpha_sum) as u8,
-                    (green_sum / alpha_sum) as u8,
-                    (blue_sum / alpha_sum) as u8,
+                    red as u8,
+                    green as u8,
+                    blue as u8,
                     (alpha_sum / samples_per_pixel) as u8,
                 ]);
+            } else {
+                pixels.extend_from_slice(&[0, 0, 0, 0]);
             }
         }
     }

@@ -1,0 +1,15 @@
+{
+  "summary": {
+    "lifetimeTokens": 123456,
+    "peakDailyTokens": 42000,
+    "longestRunningTurnSec": 360,
+    "currentStreakDays": 4,
+    "longestStreakDays": 12
+  },
+  "dailyUsageBuckets": [
+    { "startDate": "2026-07-09", "tokens": 12000 },
+    { "startDate": "2026-07-10", "tokens": 15000 }
+  ],
+  "accessToken": "usage-secret-value",
+  "rawPayload": { "claim": "raw-secret-value" }
+}

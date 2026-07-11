@@ -1,3 +1,4 @@
+mod child_process;
 mod codex;
 mod core;
 mod detection;
@@ -16,12 +17,14 @@ mod accessibility;
 use std::{
     fs,
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use core::{sanitize_for_frontend, ProviderId, UsageSnapshot};
 use diagnostics::write_diagnostic_export;
 use monitor_controls::{crossing_alerts, validate_preferences, AlertTracker, MonitorPreferences};
-use spend::{bundled_pricing_table, estimate_spend, SpendEstimate, SpendScanner};
+use serde::Serialize;
+use spend::{LocalUsageHistory, SpendEstimate, SpendScanner, UsageHistoryRange};
 use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -47,10 +50,13 @@ fn refresh_usage(app: &tauri::AppHandle) -> Vec<UsageSnapshot> {
         .filter(|client| client.provider == ProviderId::Codex)
         .filter_map(|client| {
             let mut cache = state.codex_cache.lock().ok()?;
-            Some(sanitize_for_frontend(codex::refresh_snapshot(
-                &mut cache,
-                &client.executable,
-            )))
+            let refresh = codex::refresh_snapshot_with_context(&mut cache, &client.executable);
+            if let Some(context) = refresh.context {
+                if let Ok(mut stored) = state.account_context.lock() {
+                    *stored = Some(merge_account_context(stored.take(), context));
+                }
+            }
+            Some(sanitize_for_frontend(refresh.snapshot))
         })
         .collect();
 
@@ -88,6 +94,7 @@ fn alert_message(preferences: &MonitorPreferences, label: &str, threshold: u8) -
 
 struct AppState {
     codex_cache: Mutex<codex::SnapshotCache>,
+    account_context: Mutex<Option<codex::CodexAccountContext>>,
     preferences: Mutex<MonitorPreferences>,
     alerts: Mutex<AlertTracker>,
     backdrop: Mutex<windows_backdrop::BackdropMode>,
@@ -95,6 +102,72 @@ struct AppState {
     tray_presentation: Mutex<TrayPresentationTracker>,
     tray_click: Mutex<TrayClickTracker>,
     spend_scanner: Arc<Mutex<SpendScanner>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageHistoryResponse {
+    local: LocalUsageHistory,
+    account: Option<AccountUsageHistory>,
+    profile: UsageProfile,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountUsageHistory {
+    summary: AccountUsageSummary,
+    daily: Vec<AccountUsageDay>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountUsageSummary {
+    lifetime_tokens: Option<i64>,
+    peak_daily_tokens: Option<i64>,
+    longest_running_turn_seconds: Option<i64>,
+    current_streak_days: Option<i64>,
+    longest_streak_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountUsageDay {
+    start_date: String,
+    tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageProfile {
+    auth_mode: Option<codex::CodexAuthMode>,
+    plan_type: Option<String>,
+    scope_label: String,
+    hermes_status: codex::provider_context::HermesStatus,
+    hermes_label: String,
+}
+
+fn merge_account_context(
+    previous: Option<codex::CodexAccountContext>,
+    mut next: codex::CodexAccountContext,
+) -> codex::CodexAccountContext {
+    let Some(previous) = previous else {
+        return next;
+    };
+    let same_scope = next.profile_scope.auth_mode == codex::CodexAuthMode::Unknown
+        || next.profile_scope.auth_mode == previous.profile_scope.auth_mode;
+    if next.profile_scope.auth_mode == codex::CodexAuthMode::Unknown {
+        let hermes_status = next.profile_scope.hermes_status;
+        let hermes_confidence = next.profile_scope.hermes_confidence;
+        next.profile_scope = previous.profile_scope.clone();
+        next.profile_scope.hermes_status = hermes_status;
+        next.profile_scope.hermes_confidence = hermes_confidence;
+    } else if same_scope && next.profile_scope.plan_type.is_none() {
+        next.profile_scope.plan_type = previous.profile_scope.plan_type.clone();
+    }
+    if same_scope && next.token_activity.is_none() {
+        next.token_activity = previous.token_activity;
+    }
+    next
 }
 
 fn preferences_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -166,6 +239,13 @@ fn get_monitor_preferences(state: tauri::State<'_, AppState>) -> MonitorPreferen
 }
 
 #[tauri::command]
+async fn get_provider_capabilities() -> Vec<detection::ProviderCapability> {
+    tauri::async_runtime::spawn_blocking(detection::provider_capabilities)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 fn save_monitor_preferences(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -190,19 +270,36 @@ fn save_monitor_preferences(
 }
 
 fn codex_log_directory() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(|home| PathBuf::from(home).join(".codex").join("sessions"))
+    std::env::var_os("CODEX_HOME")
+        .map(|home| PathBuf::from(home).join("sessions"))
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|home| PathBuf::from(home).join(".codex").join("sessions"))
+        })
 }
 
 fn local_spend_estimate(scanner: &mut SpendScanner) -> Result<SpendEstimate, String> {
-    let records = match codex_log_directory() {
-        Some(path) => scanner
-            .read_usage_records(&path)
-            .map_err(|error| error.to_string())?,
-        None => Vec::new(),
-    };
-    Ok(estimate_spend(&records, &bundled_pricing_table()))
+    let history = local_usage_history(scanner, UsageHistoryRange::SevenDays)?;
+    Ok(SpendEstimate {
+        amount_usd: history.api_equivalent.amount_usd,
+        pricing_coverage_percent: history.api_equivalent.priced_token_percent,
+        pricing_table_version: history.api_equivalent.pricing_table_version,
+        record_count: history.record_count,
+        is_estimate: true,
+        label: "Estimated 7-day API equivalent (not subscription billing)".to_owned(),
+    })
+}
+
+fn local_usage_history(
+    scanner: &mut SpendScanner,
+    range: UsageHistoryRange,
+) -> Result<LocalUsageHistory, String> {
+    let path = codex_log_directory()
+        .unwrap_or_else(|| std::env::temp_dir().join("quotabuddy-missing-codex-home"));
+    scanner
+        .read_local_usage_history(&path, range, SystemTime::now())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -218,6 +315,81 @@ async fn get_local_spend_estimate(
     })
     .await
     .map_err(|_| "Spend estimate task failed.".to_owned())?
+}
+
+#[tauri::command]
+async fn get_usage_history(
+    state: tauri::State<'_, AppState>,
+    range: UsageHistoryRange,
+) -> Result<UsageHistoryResponse, String> {
+    let scanner = Arc::clone(&state.spend_scanner);
+    let context = state
+        .account_context
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut scanner = scanner
+            .lock()
+            .map_err(|_| "Usage history is unavailable.".to_owned())?;
+        let local = local_usage_history(&mut scanner, range)?;
+        Ok(build_usage_history_response(local, context.as_ref(), range))
+    })
+    .await
+    .map_err(|_| "Usage history task failed.".to_owned())?
+}
+
+fn build_usage_history_response(
+    local: LocalUsageHistory,
+    context: Option<&codex::CodexAccountContext>,
+    range: UsageHistoryRange,
+) -> UsageHistoryResponse {
+    let detected_hermes = codex::provider_context::detect_hermes_provider();
+    let profile = context
+        .map(|context| UsageProfile {
+            auth_mode: (context.profile_scope.auth_mode != codex::CodexAuthMode::Unknown)
+                .then_some(context.profile_scope.auth_mode),
+            plan_type: context.profile_scope.plan_type.clone(),
+            scope_label: context.profile_scope.scope_label.clone(),
+            hermes_status: context.profile_scope.hermes_status,
+            hermes_label: "Hermes Agent".to_owned(),
+        })
+        .unwrap_or_else(|| UsageProfile {
+            auth_mode: None,
+            plan_type: None,
+            scope_label: "Codex account quota".to_owned(),
+            hermes_status: detected_hermes.status,
+            hermes_label: "Hermes Agent".to_owned(),
+        });
+    let account = context.and_then(|context| {
+        context
+            .token_activity
+            .as_ref()
+            .map(|activity| AccountUsageHistory {
+                summary: AccountUsageSummary {
+                    lifetime_tokens: activity.summary.lifetime_tokens,
+                    peak_daily_tokens: activity.summary.peak_daily_tokens,
+                    longest_running_turn_seconds: activity.summary.longest_running_turn_sec,
+                    current_streak_days: activity.summary.current_streak_days,
+                    longest_streak_days: activity.summary.longest_streak_days,
+                },
+                daily: activity
+                    .daily_buckets
+                    .iter()
+                    .filter(|bucket| range.includes_day(&bucket.start_date, local.to_unix_seconds))
+                    .map(|bucket| AccountUsageDay {
+                        start_date: bucket.start_date.clone(),
+                        tokens: bucket.tokens,
+                    })
+                    .collect(),
+            })
+    });
+
+    UsageHistoryResponse {
+        local,
+        account,
+        profile,
+    }
 }
 
 #[tauri::command]
@@ -409,6 +581,124 @@ fn hide_main_window_handle(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Keeps private boundary tests next to the mapper they exercise.
+mod usage_history_contract_tests {
+    use super::*;
+    use crate::{
+        codex::{
+            provider_context::{HermesConfidence, HermesStatus},
+            AccountTokenActivity, AccountTokenActivityDailyBucket, AccountTokenActivitySummary,
+            CodexAccountContext, CodexAuthMode, CodexProfileScope,
+        },
+        spend::{ApiEquivalentEstimate, LocalHistoryCoverage, TokenBreakdown},
+    };
+
+    fn empty_local() -> LocalUsageHistory {
+        LocalUsageHistory {
+            range: UsageHistoryRange::SevenDays,
+            generated_at_unix_seconds: 0,
+            from_unix_seconds: None,
+            to_unix_seconds: 1_783_771_200,
+            totals: TokenBreakdown::default(),
+            by_model: Vec::new(),
+            daily: Vec::new(),
+            api_equivalent: ApiEquivalentEstimate {
+                amount_usd: None,
+                priced_token_percent: 0.0,
+                priced_tokens: 0,
+                unpriced_tokens: 0,
+                unpriced_models: Vec::new(),
+                pricing_table_version: "test".to_owned(),
+                is_estimate: true,
+                label: "API equivalent estimate".to_owned(),
+            },
+            coverage: LocalHistoryCoverage::CompleteForSource,
+            record_count: 0,
+        }
+    }
+
+    #[test]
+    fn history_boundary_maps_account_fields_and_omits_identity_or_credential_material() {
+        let daily_buckets = [
+            "2026-05-01",
+            "2026-05-08",
+            "2026-05-15",
+            "2026-05-22",
+            "2026-06-01",
+            "2026-06-08",
+            "2026-06-15",
+            "2026-06-22",
+            "2026-07-09",
+            "2026-07-10",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, start_date)| AccountTokenActivityDailyBucket {
+            start_date: start_date.to_owned(),
+            tokens: index as i64,
+        })
+        .collect();
+        let context = CodexAccountContext {
+            profile_scope: CodexProfileScope {
+                auth_mode: CodexAuthMode::Chatgpt,
+                plan_type: Some("pro".to_owned()),
+                scope_label: "Codex account quota".to_owned(),
+                hermes_status: HermesStatus::Configured,
+                hermes_confidence: HermesConfidence::Inferred,
+            },
+            token_activity: Some(AccountTokenActivity {
+                summary: AccountTokenActivitySummary {
+                    lifetime_tokens: Some(123),
+                    peak_daily_tokens: Some(45),
+                    longest_running_turn_sec: Some(67),
+                    current_streak_days: Some(8),
+                    longest_streak_days: Some(9),
+                },
+                daily_buckets,
+            }),
+        };
+
+        let response = build_usage_history_response(
+            empty_local(),
+            Some(&context),
+            UsageHistoryRange::SevenDays,
+        );
+        let json = serde_json::to_value(response).expect("history serializes");
+        let serialized = json.to_string().to_ascii_lowercase();
+
+        assert_eq!(json["account"]["daily"].as_array().unwrap().len(), 2);
+        assert_eq!(json["account"]["summary"]["longestRunningTurnSeconds"], 67);
+        assert_eq!(json["profile"]["hermesStatus"], "configured");
+        assert_eq!(json["local"]["coverage"], "completeForSource");
+        for forbidden in [
+            "email",
+            "accountid",
+            "accesstoken",
+            "refreshtoken",
+            "hermesconfidence",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+
+        let transient = CodexAccountContext {
+            profile_scope: CodexProfileScope {
+                auth_mode: CodexAuthMode::Unknown,
+                plan_type: None,
+                scope_label: "Codex account quota".to_owned(),
+                hermes_status: HermesStatus::Active,
+                hermes_confidence: HermesConfidence::Inferred,
+            },
+            token_activity: None,
+        };
+        let merged = merge_account_context(Some(context), transient);
+        assert_eq!(merged.profile_scope.auth_mode, CodexAuthMode::Chatgpt);
+        assert_eq!(merged.profile_scope.plan_type.as_deref(), Some("pro"));
+        assert_eq!(merged.profile_scope.hermes_status, HermesStatus::Active);
+        assert!(merged.token_activity.is_some());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -420,6 +710,7 @@ pub fn run() {
         }))
         .manage(AppState {
             codex_cache: Mutex::new(codex::SnapshotCache::default()),
+            account_context: Mutex::new(None),
             preferences: Mutex::new(MonitorPreferences::default()),
             alerts: Mutex::new(AlertTracker::default()),
             backdrop: Mutex::new(windows_backdrop::BackdropMode::Solid),
@@ -488,8 +779,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_usage_snapshots,
             get_monitor_preferences,
+            get_provider_capabilities,
             save_monitor_preferences,
             get_local_spend_estimate,
+            get_usage_history,
             export_redacted_diagnostics,
             get_window_backdrop,
             hide_main_window

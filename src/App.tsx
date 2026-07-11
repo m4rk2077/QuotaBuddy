@@ -2,14 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import brandIcon from "../src-tauri/icons/icon.png";
-import type { SpendEstimate, UsageMetric, UsageSnapshot } from "./contracts";
+import type { ProviderCapability, SpendEstimate, UsageMetric, UsageSnapshot } from "./contracts";
 import { canPinMetric, defaultMonitorPreferences, getMonitorPreferences, MonitorPreferenceSaveCoordinator, saveMonitorPreferences, updateAlertThresholds, type MonitorPreferences } from "./monitor-controls";
 import { getMetricPresentation, getSnapshotDisplayState, selectOverviewMetrics, shouldShowEmptyState, type MetricSeverity } from "./panel-state";
 import { createSingleFlightRefresh } from "./refresh-state";
-import { exportRedactedDiagnostics, getLocalSpendEstimate, getUsageSnapshots } from "./usage";
+import { formatPercent } from "./history-format";
+import { HistoryPanel } from "./history-panel";
+import { exportRedactedDiagnostics, getLocalSpendEstimate, getProviderCapabilities, getUsageSnapshots } from "./usage";
 import "./App.css";
 
-type View = "overview" | "settings";
+type View = "overview" | "history" | "settings";
 type Copy = typeof en;
 
 function App() {
@@ -24,6 +26,7 @@ function App() {
   const [estimateError, setEstimateError] = useState(false);
   const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
   const [diagnosticError, setDiagnosticError] = useState(false);
+  const [providerCapabilities, setProviderCapabilities] = useState<ProviderCapability[]>([]);
   const pendingPreferenceSave = useRef(Promise.resolve());
   const preferenceSaveCoordinator = useRef<MonitorPreferenceSaveCoordinator | null>(null);
   if (!preferenceSaveCoordinator.current) {
@@ -75,6 +78,7 @@ function App() {
         if (hydrated) setPreferences(hydrated);
       })
       .catch(() => setLoadError(preferencesFailedText.current));
+    void getProviderCapabilities().then(setProviderCapabilities).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -96,7 +100,7 @@ function App() {
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (view === "settings") setView("overview");
+      if (view !== "overview") setView("overview");
       else void invoke("hide_main_window");
     };
     window.addEventListener("keydown", handleEscape);
@@ -148,25 +152,29 @@ function App() {
           preferences={preferences}
           text={text}
           onRefresh={() => void refresh()}
+          onHistory={() => setView("history")}
           onSettings={() => setView("settings")}
         />
-      ) : (
+      ) : view === "settings" ? (
         <SettingsPanel
           preferences={preferences}
           text={text}
           saving={savingPreferences}
           diagnosticStatus={diagnosticStatus}
           diagnosticError={diagnosticError}
+          providerCapabilities={providerCapabilities}
           onBack={() => setView("overview")}
           onChange={updatePreferences}
           onExport={exportDiagnostics}
         />
+      ) : (
+        <HistoryPanel language={preferences.language} onBack={() => setView("overview")} />
       )}
     </main>
   );
 }
 
-function Overview({ snapshots, loading, loadError, estimate, estimateLoading, estimateError, preferences, text, onRefresh, onSettings }: {
+function Overview({ snapshots, loading, loadError, estimate, estimateLoading, estimateError, preferences, text, onRefresh, onHistory, onSettings }: {
   snapshots: UsageSnapshot[];
   loading: boolean;
   loadError: string | null;
@@ -176,6 +184,7 @@ function Overview({ snapshots, loading, loadError, estimate, estimateLoading, es
   preferences: MonitorPreferences;
   text: Copy;
   onRefresh: () => void;
+  onHistory: () => void;
   onSettings: () => void;
 }) {
   const snapshot = snapshots.find((item) => item.provider === "codex") ?? snapshots[0];
@@ -191,10 +200,11 @@ function Overview({ snapshots, loading, loadError, estimate, estimateLoading, es
         <MetricCard slot="weekly" metric={selected.weekly} snapshot={snapshot} loading={loading} thresholds={preferences.alertThresholds} text={text} />
       </section>
     )}
-    <SpendRow estimate={estimate} loading={estimateLoading} unavailable={estimateError} text={text} />
+    <SpendRow estimate={estimate} loading={estimateLoading} unavailable={estimateError} text={text} onOpenHistory={onHistory} />
     <footer className="panel-footer">
       <span className="privacy-note">{text.localOnly}</span>
       <div className="footer-actions">
+        <IconButton label={text.history} onClick={onHistory}><ChartIcon /></IconButton>
         <IconButton label={loading ? text.refreshing : text.refresh} onClick={onRefresh} disabled={loading}><RefreshIcon /></IconButton>
         <IconButton label={text.settings} onClick={onSettings}><SettingsIcon /></IconButton>
       </div>
@@ -285,21 +295,25 @@ function MetricSkeleton({ title }: { title: string }) {
   </article>;
 }
 
-function SpendRow({ estimate, loading, unavailable, text }: { estimate: SpendEstimate | null; loading: boolean; unavailable: boolean; text: Copy }) {
-  const amount = estimate ? new Intl.NumberFormat(text.locale, { style: "currency", currency: "USD" }).format(estimate.amountUsd) : "—";
-  return <section className="spend-row" aria-label={text.estimatedSpend} aria-busy={loading}>
+function SpendRow({ estimate, loading, unavailable, text, onOpenHistory }: { estimate: SpendEstimate | null; loading: boolean; unavailable: boolean; text: Copy; onOpenHistory: () => void }) {
+  const amount = estimate?.amountUsd !== null && estimate?.amountUsd !== undefined ? new Intl.NumberFormat(text.locale, { style: "currency", currency: "USD" }).format(estimate.amountUsd) : "—";
+  const note = estimate?.isEstimate && estimate.pricingCoveragePercent < 100
+    ? text.partialPricing.replace("{percent}", formatPercent(estimate.pricingCoveragePercent))
+    : estimate?.isEstimate ? text.notSubscriptionCharge : text.localData;
+  return <button className="spend-row" type="button" aria-label={text.openHistory} aria-busy={loading} onClick={onOpenHistory}>
     <WalletIcon />
-    <div><span>{text.estimatedSpend}</span><small>{loading ? text.calculatingEstimate : estimate?.isEstimate ? text.estimate : text.localData}</small></div>
-    <strong>{loading ? "…" : unavailable ? text.unavailable : amount}</strong>
-  </section>;
+    <div><span>{text.estimatedSpend}</span><small>{loading ? text.calculatingEstimate : note}</small></div>
+    <span className="spend-amount"><strong>{loading ? "…" : unavailable ? text.unavailable : amount}</strong><ChevronRightIcon /></span>
+  </button>;
 }
 
-function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnosticError, onBack, onChange, onExport }: {
+function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnosticError, providerCapabilities, onBack, onChange, onExport }: {
   preferences: MonitorPreferences;
   text: Copy;
   saving: boolean;
   diagnosticStatus: string | null;
   diagnosticError: boolean;
+  providerCapabilities: ProviderCapability[];
   onBack: () => void;
   onChange: (preferences: MonitorPreferences) => Promise<void>;
   onExport: () => void;
@@ -330,6 +344,10 @@ function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnostic
         <h2>{text.behavior}</h2>
         <label className="check"><input type="checkbox" checked={preferences.startWithWindows} onChange={(event) => void onChange({ ...preferences, startWithWindows: event.target.checked })} /><span>{text.startup}</span></label>
       </div>
+      <div className="settings-group integrations-group">
+        <h2>{text.integrations}</h2>
+        {providerCapabilities.length === 0 ? <p className="integration-note">{text.integrationsUnavailable}</p> : providerCapabilities.map((capability) => <ProviderCapabilityRow key={capability.provider} capability={capability} text={text} />)}
+      </div>
       <fieldset className="settings-group"><legend>{text.alerts}</legend>{preferences.alertThresholds.map((threshold, index) => <label key={index}>{index === 0 ? text.warningAt : text.criticalAt}<span className="number-field"><input type="number" min="1" max="100" value={threshold} onChange={(event) => setThreshold(index, event.target.value)} />%</span></label>)}</fieldset>
       <fieldset className="settings-group"><legend>{text.tray}</legend>{metrics.map((kind) => <label className="check" key={kind}><input type="checkbox" checked={preferences.pinnedMetrics.includes(kind)} disabled={!canPinMetric(preferences.pinnedMetrics, kind)} onChange={() => toggleMetric(kind)} /><span>{kind === "session" ? text.session : text.weekly}</span></label>)}</fieldset>
       <div className="settings-group diagnostics">
@@ -339,6 +357,21 @@ function SettingsPanel({ preferences, text, saving, diagnosticStatus, diagnostic
       </div>
     </div>
   </section>;
+}
+
+function ProviderCapabilityRow({ capability, text }: { capability: ProviderCapability; text: Copy }) {
+  const label = capability.provider === "codex" ? "Codex" : capability.provider === "claudeCode" ? "Claude Code" : "Cursor";
+  const detail = !capability.clientDetected
+    ? text.clientNotDetected
+    : capability.usageIntegration === "native"
+      ? text.nativeIntegration
+      : capability.usageIntegration === "optInBridge"
+        ? text.optInBridge
+        : text.personalUsageUnavailable;
+  return <div className="integration-row">
+    <span className={`integration-dot${capability.clientDetected ? " detected" : ""}`} aria-hidden="true" />
+    <div><strong>{label}</strong><small>{detail}</small></div>
+  </div>;
 }
 
 function IconButton({ label, children, onClick, disabled = false }: { label: string; children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
@@ -398,21 +431,23 @@ const SettingsIcon = () => <Icon><circle cx="12" cy="12" r="3" /><path d="M19.4 
 const ClockIcon = () => <Icon><circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" /></Icon>;
 const WalletIcon = () => <Icon><path d="M3 6.5h16a2 2 0 0 1 2 2v9H5a2 2 0 0 1-2-2v-9Zm0 0 13-2v2M16 12h5" /><circle cx="16" cy="12" r=".6" /></Icon>;
 const BackIcon = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;
+const ChartIcon = () => <Icon><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /></Icon>;
+const ChevronRightIcon = () => <Icon><path d="m9 18 6-6-6-6" /></Icon>;
 
 const en = {
   locale: "en-US", loadFailed: "Could not update usage", preferencesFailed: "Preferences unavailable", preferencesSaveFailed: "Could not save preferences",
   refresh: "Refresh", refreshing: "Updating…", updateFailed: "Update failed", updateFailedDescription: "QuotaBuddy could not read local usage. Try again from the refresh button.", failedWithCache: "Update failed · showing cached data", updatedNow: "Updated just now", updatedMinutes: "Updated {minutes} min ago", noClient: "Codex not detected", noClientDescription: "Open or sign in to Codex, then refresh. QuotaBuddy will keep checking locally.",
   session: "Session limit", weekly: "Weekly limit", remaining: "remaining", warningRemaining: "remaining · attention", criticalRemaining: "remaining · critical", unavailable: "Unavailable", stale: "Data may be out of date", staleShort: "remaining · stale", failedCachedShort: "remaining · update failed", reauthRequired: "Sign in to Codex again", reauthShort: "Sign in required",
-  resetsIn: "resets in {duration}", resetNow: "resets now", resetUnknown: "reset unavailable", estimatedSpend: "Estimated spend", calculatingEstimate: "Calculating locally…", estimate: "Estimate", localData: "Local data", localOnly: "Local & private",
-  settings: "Settings", back: "Back to usage", settingsSubtitle: "Local monitor preferences", saving: "Saving…", appearance: "Appearance", theme: "Theme", dark: "Dark", light: "Light", language: "Language", behavior: "Behavior", startup: "Start QuotaBuddy with Windows", alerts: "Usage alerts", warningAt: "Warning at", criticalAt: "Critical at", tray: "Tray metrics (up to two)", privacy: "Privacy & diagnostics", diagnosticsDescription: "Exports a redacted local diagnostic file. Credentials are never included.", exportDiagnostics: "Export redacted diagnostics", diagnosticsSaved: "Saved:", diagnosticsFailed: "Could not export diagnostics.",
+  resetsIn: "resets in {duration}", resetNow: "resets now", resetUnknown: "reset unavailable", estimatedSpend: "Estimated API equivalent", calculatingEstimate: "Calculating locally…", estimate: "Estimate", notSubscriptionCharge: "7 days · not billing", partialPricing: "{percent} priced · not billing", localData: "Local data", localOnly: "Local & private", openHistory: "Open usage history", history: "History",
+  settings: "Settings", back: "Back to usage", settingsSubtitle: "Local monitor preferences", saving: "Saving…", appearance: "Appearance", theme: "Theme", dark: "Dark", light: "Light", language: "Language", behavior: "Behavior", startup: "Start QuotaBuddy with Windows", integrations: "Integrations", integrationsUnavailable: "Provider discovery is unavailable.", clientNotDetected: "Not detected on this PC", nativeIntegration: "Detected · native monitoring", optInBridge: "Detected · opt-in bridge available", personalUsageUnavailable: "Detected · personal usage is not exposed officially", alerts: "Usage alerts", warningAt: "Warning at", criticalAt: "Critical at", tray: "Tray metrics (up to two)", privacy: "Privacy & diagnostics", diagnosticsDescription: "Exports a redacted local diagnostic file. Credentials are never included.", exportDiagnostics: "Export redacted diagnostics", diagnosticsSaved: "Saved:", diagnosticsFailed: "Could not export diagnostics.",
 };
 
 const ptBr: Partial<Copy> = {
   locale: "pt-BR", loadFailed: "Não foi possível atualizar o uso", preferencesFailed: "Preferências indisponíveis", preferencesSaveFailed: "Não foi possível salvar as preferências",
   refresh: "Atualizar", refreshing: "Atualizando…", updateFailed: "Falha na atualização", updateFailedDescription: "O QuotaBuddy não conseguiu ler o uso local. Tente novamente pelo botão de atualizar.", failedWithCache: "Falha ao atualizar · exibindo dados salvos", updatedNow: "Atualizado agora", updatedMinutes: "Atualizado há {minutes} min", noClient: "Codex não detectado", noClientDescription: "Abra ou entre no Codex e atualize. O QuotaBuddy continuará verificando localmente.",
   session: "Limite da sessão", weekly: "Limite semanal", remaining: "restante", warningRemaining: "restante · atenção", criticalRemaining: "restante · crítico", unavailable: "Indisponível", stale: "Dados podem estar desatualizados", staleShort: "restante · desatualizado", failedCachedShort: "restante · falha ao atualizar", reauthRequired: "Entre novamente no Codex", reauthShort: "Login necessário",
-  resetsIn: "reinicia em {duration}", resetNow: "reinicia agora", resetUnknown: "reinício indisponível", estimatedSpend: "Gasto estimado", calculatingEstimate: "Calculando localmente…", estimate: "Estimativa", localData: "Dados locais", localOnly: "Local e privado",
-  settings: "Configurações", back: "Voltar ao uso", settingsSubtitle: "Preferências do monitor local", saving: "Salvando…", appearance: "Aparência", theme: "Tema", dark: "Escuro", light: "Claro", language: "Idioma", behavior: "Comportamento", startup: "Iniciar o QuotaBuddy com o Windows", alerts: "Alertas de uso", warningAt: "Atenção em", criticalAt: "Crítico em", tray: "Métricas da bandeja (até duas)", privacy: "Privacidade e diagnóstico", diagnosticsDescription: "Exporta um arquivo local redigido. Credenciais nunca são incluídas.", exportDiagnostics: "Exportar diagnóstico redigido", diagnosticsSaved: "Salvo:", diagnosticsFailed: "Não foi possível exportar o diagnóstico.",
+  resetsIn: "reinicia em {duration}", resetNow: "reinicia agora", resetUnknown: "reinício indisponível", estimatedSpend: "Equivalente API estimado", calculatingEstimate: "Calculando localmente…", estimate: "Estimativa", notSubscriptionCharge: "7 dias · não é cobrança", partialPricing: "{percent} precificados · não é cobrança", localData: "Dados locais", localOnly: "Local e privado", openHistory: "Abrir histórico de uso", history: "Histórico",
+  settings: "Configurações", back: "Voltar ao uso", settingsSubtitle: "Preferências do monitor local", saving: "Salvando…", appearance: "Aparência", theme: "Tema", dark: "Escuro", light: "Claro", language: "Idioma", behavior: "Comportamento", startup: "Iniciar o QuotaBuddy com o Windows", integrations: "Integrações", integrationsUnavailable: "A descoberta de provedores está indisponível.", clientNotDetected: "Não detectado neste PC", nativeIntegration: "Detectado · monitoramento nativo", optInBridge: "Detectado · bridge opt-in disponível", personalUsageUnavailable: "Detectado · uso pessoal não é exposto oficialmente", alerts: "Alertas de uso", warningAt: "Atenção em", criticalAt: "Crítico em", tray: "Métricas da bandeja (até duas)", privacy: "Privacidade e diagnóstico", diagnosticsDescription: "Exporta um arquivo local redigido. Credenciais nunca são incluídas.", exportDiagnostics: "Exportar diagnóstico redigido", diagnosticsSaved: "Salvo:", diagnosticsFailed: "Não foi possível exportar o diagnóstico.",
 };
 
 export default App;

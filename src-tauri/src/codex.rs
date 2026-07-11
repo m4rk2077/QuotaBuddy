@@ -1,6 +1,6 @@
 use std::{
     io::{BufRead, BufReader, Write},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -9,11 +9,22 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::core::{
-    Availability, MetricKind, ResetMetadata, SnapshotError, SnapshotStatus, UsageMetric,
-    UsageSnapshot,
+#[path = "provider_context.rs"]
+pub mod provider_context;
+
+use provider_context::{
+    detect_hermes_provider, HermesConfidence, HermesProviderContext, HermesStatus,
+};
+
+use crate::{
+    child_process,
+    core::{
+        Availability, MetricKind, ResetMetadata, SnapshotError, SnapshotStatus, UsageMetric,
+        UsageSnapshot,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +32,67 @@ pub enum AdapterFailure {
     Unavailable,
     ExpiredSession,
     Transient,
+}
+
+/// Allowlisted account-wide Codex activity. This never contains identity or credential fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTokenActivity {
+    pub summary: AccountTokenActivitySummary,
+    pub daily_buckets: Vec<AccountTokenActivityDailyBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTokenActivitySummary {
+    pub lifetime_tokens: Option<i64>,
+    pub peak_daily_tokens: Option<i64>,
+    pub longest_running_turn_sec: Option<i64>,
+    pub current_streak_days: Option<i64>,
+    pub longest_streak_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTokenActivityDailyBucket {
+    pub start_date: String,
+    pub tokens: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexAuthMode {
+    Chatgpt,
+    ApiKey,
+    AmazonBedrock,
+    Unknown,
+}
+
+/// Privacy-safe description of the active quota scope and Hermes configuration inference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProfileScope {
+    pub auth_mode: CodexAuthMode,
+    pub plan_type: Option<String>,
+    pub scope_label: String,
+    pub hermes_status: HermesStatus,
+    pub hermes_confidence: HermesConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountContext {
+    pub profile_scope: CodexProfileScope,
+    pub token_activity: Option<AccountTokenActivity>,
+}
+
+/// Combined refresh result for callers that need the optional account context.
+/// Existing callers can keep using [`refresh_snapshot`] unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRefreshResult {
+    pub snapshot: UsageSnapshot,
+    pub context: Option<CodexAccountContext>,
 }
 
 impl AdapterFailure {
@@ -75,10 +147,24 @@ impl SnapshotCache {
     }
 }
 
+#[allow(dead_code)] // Kept as the snapshot-only adapter boundary for existing native callers.
 pub fn refresh_snapshot(cache: &mut SnapshotCache, executable: &str) -> UsageSnapshot {
-    match read_live_snapshot(executable) {
-        Ok(snapshot) => cache.store_success(snapshot),
-        Err(failure) => cache.failure(failure),
+    refresh_snapshot_with_context(cache, executable).snapshot
+}
+
+pub fn refresh_snapshot_with_context(
+    cache: &mut SnapshotCache,
+    executable: &str,
+) -> CodexRefreshResult {
+    match read_live_snapshot_with_context(executable) {
+        Ok(mut result) => {
+            result.snapshot = cache.store_success(result.snapshot);
+            result
+        }
+        Err(failure) => CodexRefreshResult {
+            snapshot: cache.failure(failure),
+            context: None,
+        },
     }
 }
 
@@ -98,7 +184,7 @@ fn unavailable_snapshot(failure: AdapterFailure) -> UsageSnapshot {
     }
 }
 
-fn read_live_snapshot(executable: &str) -> Result<UsageSnapshot, AdapterFailure> {
+fn read_live_snapshot_with_context(executable: &str) -> Result<CodexRefreshResult, AdapterFailure> {
     let mut rpc = JsonRpcClient::start(executable)?;
     rpc.request(
         "initialize",
@@ -106,14 +192,161 @@ fn read_live_snapshot(executable: &str) -> Result<UsageSnapshot, AdapterFailure>
             "clientInfo": { "name": "QuotaBuddy", "version": env!("CARGO_PKG_VERSION") }
         }),
     )?;
+    rpc.notify("initialized", json!({}))?;
+
+    // Fetch the mandatory quota first. If either optional RPC is absent, errors, or times out on
+    // an older Codex build, the already-normalized rate limits still remain usable.
     let rate_limits = rpc.request("account/rateLimits/read", json!({}))?;
 
-    // Usage is read through the same authenticated local session. Its token and bucket
-    // fields are intentionally discarded: this slice exposes rate limits only. Discovery
-    // marks this experimental method optional, so an error cannot discard valid limits.
-    let _usage = rpc.request("account/usage/read", json!({}));
+    // Account metadata is optional and never proactively refreshes credentials. The response is
+    // normalized through an allowlist that discards email, identifiers, claims and raw payloads.
+    let account = rpc
+        .request("account/read", json!({ "refreshToken": false }))
+        .ok();
 
-    normalize_rate_limit_value(&rate_limits, &utc_now())
+    // Usage is read through the same authenticated local session. It remains best-effort: older
+    // Codex versions may not expose this method, and that must never discard valid rate limits.
+    let usage = rpc.request("account/usage/read", json!({})).ok();
+
+    normalize_live_values(
+        &rate_limits,
+        account.as_ref(),
+        usage.as_ref(),
+        detect_hermes_provider(),
+        &utc_now(),
+    )
+}
+
+fn normalize_live_values(
+    rate_limits: &Value,
+    account: Option<&Value>,
+    usage: Option<&Value>,
+    hermes: HermesProviderContext,
+    refreshed_at: &str,
+) -> Result<CodexRefreshResult, AdapterFailure> {
+    let snapshot = normalize_rate_limit_value(rate_limits, refreshed_at)?;
+    let context = CodexAccountContext {
+        profile_scope: normalize_profile_scope(account, hermes),
+        token_activity: usage.and_then(normalize_account_token_activity),
+    };
+
+    Ok(CodexRefreshResult {
+        snapshot,
+        context: Some(context),
+    })
+}
+
+fn normalize_profile_scope(
+    account: Option<&Value>,
+    hermes: HermesProviderContext,
+) -> CodexProfileScope {
+    let account_type = account
+        .and_then(|response| response.get("account"))
+        .and_then(|account| account.get("type"))
+        .and_then(Value::as_str);
+    let auth_mode = match account_type {
+        Some("chatgpt") => CodexAuthMode::Chatgpt,
+        Some("apiKey") => CodexAuthMode::ApiKey,
+        Some("amazonBedrock") => CodexAuthMode::AmazonBedrock,
+        _ => CodexAuthMode::Unknown,
+    };
+    let plan_type = if auth_mode == CodexAuthMode::Chatgpt {
+        account
+            .and_then(|response| response.pointer("/account/planType"))
+            .and_then(Value::as_str)
+            .and_then(normalize_plan_type)
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    let scope_label = match auth_mode {
+        CodexAuthMode::Chatgpt => "OpenAI account · shared Codex quota",
+        CodexAuthMode::ApiKey => "OpenAI API account",
+        CodexAuthMode::AmazonBedrock => "Amazon Bedrock account",
+        CodexAuthMode::Unknown => "Codex account quota",
+    }
+    .to_owned();
+
+    CodexProfileScope {
+        auth_mode,
+        plan_type,
+        scope_label,
+        hermes_status: hermes.status,
+        hermes_confidence: hermes.confidence,
+    }
+}
+
+fn normalize_account_token_activity(response: &Value) -> Option<AccountTokenActivity> {
+    let summary = response.get("summary")?;
+    let summary = AccountTokenActivitySummary {
+        lifetime_tokens: nonnegative_i64(summary.get("lifetimeTokens")),
+        peak_daily_tokens: nonnegative_i64(summary.get("peakDailyTokens")),
+        longest_running_turn_sec: nonnegative_i64(summary.get("longestRunningTurnSec")),
+        current_streak_days: nonnegative_i64(summary.get("currentStreakDays")),
+        longest_streak_days: nonnegative_i64(summary.get("longestStreakDays")),
+    };
+    let mut daily_buckets: Vec<_> = response
+        .get("dailyUsageBuckets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|bucket| {
+            let start_date = bucket.get("startDate").and_then(Value::as_str)?;
+            if !is_iso_date(start_date) {
+                return None;
+            }
+            let tokens = nonnegative_i64(bucket.get("tokens"))?;
+            Some(AccountTokenActivityDailyBucket {
+                start_date: start_date.to_owned(),
+                tokens,
+            })
+        })
+        .collect();
+    daily_buckets.sort_by(|left, right| left.start_date.cmp(&right.start_date));
+    let excess = daily_buckets.len().saturating_sub(1_000);
+    daily_buckets.drain(..excess);
+
+    Some(AccountTokenActivity {
+        summary,
+        daily_buckets,
+    })
+}
+
+fn nonnegative_i64(value: Option<&Value>) -> Option<i64> {
+    const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
+    value
+        .and_then(Value::as_i64)
+        .filter(|value| (0..=MAX_SAFE_JSON_INTEGER).contains(value))
+}
+
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+fn normalize_plan_type(value: &str) -> Option<&str> {
+    [
+        "free",
+        "go",
+        "plus",
+        "pro",
+        "prolite",
+        "team",
+        "self_serve_business_usage_based",
+        "business",
+        "enterprise_cbp_usage_based",
+        "enterprise",
+        "edu",
+        "unknown",
+    ]
+    .contains(&value)
+    .then_some(value)
 }
 
 struct JsonRpcClient {
@@ -127,7 +360,7 @@ struct JsonRpcClient {
 impl JsonRpcClient {
     fn start(executable: &str) -> Result<Self, AdapterFailure> {
         let mut command = if cfg!(target_os = "windows") {
-            let mut command = Command::new("cmd.exe");
+            let mut command = child_process::command("cmd.exe");
             // The executable comes only from the fixed detector candidate list.
             command.args([
                 "/d",
@@ -137,7 +370,7 @@ impl JsonRpcClient {
             ]);
             command
         } else {
-            let mut command = Command::new(executable);
+            let mut command = child_process::command(executable);
             command.args(["app-server", "--stdio"]);
             command
         };
@@ -216,6 +449,20 @@ impl JsonRpcClient {
 
         Err(AdapterFailure::Transient)
     }
+
+    fn notify(&mut self, method: &str, params: Value) -> Result<(), AdapterFailure> {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        serde_json::to_writer(&mut self.stdin, &notification)
+            .map_err(|_| AdapterFailure::Transient)?;
+        self.stdin
+            .write_all(b"\n")
+            .map_err(|_| AdapterFailure::Transient)?;
+        self.stdin.flush().map_err(|_| AdapterFailure::Transient)
+    }
 }
 
 impl Drop for JsonRpcClient {
@@ -232,7 +479,7 @@ fn terminate_process_tree(child: &mut Child) {
     #[cfg(target_os = "windows")]
     {
         // `cmd.exe /c` may otherwise leave the Codex/Node child running after a timeout.
-        let _ = Command::new("taskkill")
+        let _ = child_process::command("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .output();
     }
@@ -486,5 +733,167 @@ mod tests {
         assert_eq!(stale.status, SnapshotStatus::Failed);
         assert_eq!(stale.error.unwrap().code, "retry_later");
         assert_eq!(stale.metrics[0].used_percentage, Some(28.0));
+    }
+
+    #[test]
+    fn normalizes_official_account_activity_and_profile_schema() {
+        let rate_limits: Value =
+            serde_json::from_str(include_str!("../fixtures/codex/normal.json"))
+                .expect("rate limit fixture");
+        let account: Value =
+            serde_json::from_str(include_str!("../fixtures/codex/account_context.json"))
+                .expect("account fixture");
+        let usage: Value =
+            serde_json::from_str(include_str!("../fixtures/codex/account_usage.json"))
+                .expect("usage fixture");
+
+        let result = normalize_live_values(
+            &rate_limits,
+            Some(&account),
+            Some(&usage),
+            HermesProviderContext {
+                status: HermesStatus::Active,
+                confidence: HermesConfidence::Inferred,
+            },
+            "2026-07-10T10:00:00Z",
+        )
+        .expect("combined result");
+        let serialized = serde_json::to_value(&result).expect("serializable result");
+        let context = result.context.expect("account context");
+        let activity = context.token_activity.expect("token activity");
+
+        assert_eq!(context.profile_scope.auth_mode, CodexAuthMode::Chatgpt);
+        assert_eq!(context.profile_scope.plan_type.as_deref(), Some("plus"));
+        assert_eq!(context.profile_scope.hermes_status, HermesStatus::Active);
+        assert_eq!(activity.summary.lifetime_tokens, Some(123_456));
+        assert_eq!(activity.summary.longest_running_turn_sec, Some(360));
+        assert_eq!(activity.daily_buckets.len(), 2);
+        assert_eq!(
+            serialized.pointer("/context/profileScope/authMode"),
+            Some(&json!("chatgpt"))
+        );
+        assert_eq!(
+            serialized.pointer("/context/tokenActivity/summary/lifetimeTokens"),
+            Some(&json!(123_456))
+        );
+        assert_eq!(
+            serialized.pointer("/context/tokenActivity/dailyBuckets/0/startDate"),
+            Some(&json!("2026-07-09"))
+        );
+    }
+
+    #[test]
+    fn optional_account_rpcs_cannot_discard_valid_rate_limits() {
+        let rate_limits: Value =
+            serde_json::from_str(include_str!("../fixtures/codex/normal.json"))
+                .expect("rate limit fixture");
+
+        let result = normalize_live_values(
+            &rate_limits,
+            None,
+            None,
+            HermesProviderContext::default(),
+            "2026-07-10T10:00:00Z",
+        )
+        .expect("rate limits remain valid");
+
+        assert_eq!(result.snapshot.status, SnapshotStatus::Healthy);
+        assert_eq!(result.snapshot.metrics.len(), 2);
+        assert_eq!(
+            result
+                .context
+                .expect("safe fallback context")
+                .profile_scope
+                .auth_mode,
+            CodexAuthMode::Unknown
+        );
+    }
+
+    #[test]
+    fn normalized_context_drops_identity_credentials_claims_and_raw_payloads() {
+        let account: Value =
+            serde_json::from_str(include_str!("../fixtures/codex/account_context.json"))
+                .expect("account fixture");
+        let usage: Value =
+            serde_json::from_str(include_str!("../fixtures/codex/account_usage.json"))
+                .expect("usage fixture");
+        let context = CodexAccountContext {
+            profile_scope: normalize_profile_scope(
+                Some(&account),
+                HermesProviderContext::default(),
+            ),
+            token_activity: normalize_account_token_activity(&usage),
+        };
+        let serialized = serde_json::to_string(&context).expect("serializable context");
+
+        for forbidden in [
+            "private@example.test",
+            "account-secret-value",
+            "oauth-secret-value",
+            "claim-secret-value",
+            "usage-secret-value",
+            "raw-secret-value",
+            "accountId",
+            "accessToken",
+            "claims",
+            "rawPayload",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn malformed_or_negative_usage_values_are_not_forwarded() {
+        let usage = json!({
+            "summary": {
+                "lifetimeTokens": -1,
+                "peakDailyTokens": "not-a-number",
+                "longestRunningTurnSec": null,
+                "currentStreakDays": 2,
+                "longestStreakDays": 7
+            },
+            "dailyUsageBuckets": [
+                { "startDate": "not-a-date", "tokens": 99 },
+                { "startDate": "2026-07-10", "tokens": -4 },
+                { "startDate": "2026-07-11", "tokens": 5 }
+            ]
+        });
+
+        let activity = normalize_account_token_activity(&usage).expect("summary exists");
+
+        assert_eq!(activity.summary.lifetime_tokens, None);
+        assert_eq!(activity.summary.peak_daily_tokens, None);
+        assert_eq!(activity.summary.current_streak_days, Some(2));
+        assert_eq!(activity.daily_buckets.len(), 1);
+        assert_eq!(activity.daily_buckets[0].tokens, 5);
+    }
+
+    #[test]
+    fn account_activity_keeps_the_most_recent_thousand_daily_buckets() {
+        let daily_usage_buckets: Vec<_> = (0..=1_001)
+            .map(|year| {
+                json!({
+                    "startDate": format!("{year:04}-01-01"),
+                    "tokens": year
+                })
+            })
+            .collect();
+        let usage = json!({
+            "summary": {},
+            "dailyUsageBuckets": daily_usage_buckets
+        });
+
+        let activity = normalize_account_token_activity(&usage).expect("summary exists");
+
+        assert_eq!(activity.daily_buckets.len(), 1_000);
+        assert_eq!(activity.daily_buckets[0].start_date, "0002-01-01");
+        assert_eq!(
+            activity
+                .daily_buckets
+                .last()
+                .expect("latest bucket")
+                .start_date,
+            "1001-01-01"
+        );
     }
 }
