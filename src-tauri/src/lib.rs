@@ -412,6 +412,12 @@ fn hide_main_window_handle(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Keep this first: official Tauri plugins run in registration order, and the
+        // single-instance guard must intercept a second process before other setup.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            core::log_redacted("QuotaBuddy reused the existing instance");
+            show_main_window(app, None);
+        }))
         .manage(AppState {
             codex_cache: Mutex::new(codex::SnapshotCache::default()),
             preferences: Mutex::new(MonitorPreferences::default()),

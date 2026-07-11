@@ -38,8 +38,8 @@ The distributable files are written to `release/` and are intentionally ignored
 by Git. Verify a downloaded installer before running it:
 
 ```powershell
-Get-FileHash .\release\QuotaBuddy_0.1.0_x64-setup.exe -Algorithm SHA256
-Get-Content .\release\QuotaBuddy_0.1.0_x64-setup.exe.sha256
+Get-FileHash .\release\QuotaBuddy_0.1.1_x64-setup.exe -Algorithm SHA256
+Get-Content .\release\QuotaBuddy_0.1.1_x64-setup.exe.sha256
 ```
 
 Do not publish a GitHub Release until the installer, checksum, and the gates

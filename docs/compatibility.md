@@ -9,6 +9,12 @@
 V1 does not support macOS or Linux. It has no auto-update and is not code
 signed, so Windows may show a trust prompt during installation.
 
+On Windows 11 build 22621 or newer, Desktop Acrylic is used only when High
+Contrast is off and Transparency Effects are on. Windows 10, older Windows 11
+builds, disabled transparency, High Contrast, or a failed capability check use
+the opaque graphite fallback. Experimental Windows 10 Acrylic APIs are not
+used.
+
 ## Runtime requirements
 
 - Microsoft Edge WebView2 Runtime, normally present on supported Windows
@@ -23,4 +29,5 @@ Claude Code and Cursor are out of scope for the Codex-only V1 release.
 
 The NSIS package installs for the current Windows user. Administrator rights
 are not required. A previous installation should be closed before installing a
-new build.
+new build. Starting QuotaBuddy again reuses and focuses the existing tray
+instance instead of creating a second process.
