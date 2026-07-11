@@ -22,9 +22,14 @@ if (-not (Test-Path -LiteralPath $ArtifactDirectory -PathType Container)) {
     throw "NSIS artifact directory was not found: $ArtifactDirectory. Run npm run release:windows first."
 }
 
-$installers = @(Get-ChildItem -LiteralPath $ArtifactDirectory -Filter "*.exe" -File)
+$tauriConfigPath = Join-Path $PSScriptRoot "..\src-tauri\tauri.conf.json"
+$releaseVersion = (Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json).version
+if ([string]::IsNullOrWhiteSpace($releaseVersion)) {
+    throw "Could not read the release version from $tauriConfigPath."
+}
+$installers = @(Get-ChildItem -LiteralPath $ArtifactDirectory -Filter "*_$($releaseVersion)_*-setup.exe" -File)
 if ($installers.Count -ne 1) {
-    throw "Expected exactly one NSIS installer in $ArtifactDirectory; found $($installers.Count)."
+    throw "Expected exactly one NSIS installer for version $releaseVersion in $ArtifactDirectory; found $($installers.Count)."
 }
 
 $installer = $installers[0]

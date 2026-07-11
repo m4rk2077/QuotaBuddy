@@ -8,13 +8,18 @@ Native backdrop and tray-positioning decisions: [Windows shell](docs/windows-she
 
 This foundation starts in the notification area and keeps the window available through the tray menu or a left-click. Closing the panel hides it; **Quit** explicitly exits the app.
 
-The core exposes one Rust-to-frontend contract: `UsageSnapshot`. It contains normalized availability, metrics, reset metadata, last successful refresh metadata, error state, and staleness. It intentionally has no credential, session, or token fields.
+The core exposes normalized, privacy-limited contracts. `UsageSnapshot` contains availability, quota metrics, reset metadata, refresh metadata, error state, and staleness. The history contract contains aggregated counters by day and model, but never credentials, conversation content, session identifiers, account identifiers, or source paths.
 
 Only detected Codex clients are emitted. Missing Codex clients are not sent to the panel.
 
-## Local estimated spend and diagnostics
+## Local history, API equivalent, and diagnostics
 
-Codex estimated spend uses only local JSONL log records with a model plus input/output token counts. Pricing is read from the versioned bundled table at `src-tauri/fixtures/pricing_table_2026-07-10.json`. It is always an estimate, never provider billing. User-initiated diagnostics contain summary data only: raw logs, tokens, sessions, and secret values are excluded.
+QuotaBuddy can show two deliberately separate views:
+
+- account activity returned by the authenticated Codex app-server, aggregated across clients;
+- local model history derived from allowlisted token counters in Codex JSONL rollouts on this PC.
+
+The local view includes model share, cached input, daily totals, and an API-equivalent estimate from a versioned bundled pricing table. It is a comparison against public API prices, never the actual charge for a ChatGPT subscription. User-initiated diagnostics contain summary data only: raw logs, conversation content, sessions, paths, account data, and secret values are excluded.
 
 ## Development
 
@@ -25,7 +30,7 @@ npm run tauri dev
 
 ## Windows release
 
-QuotaBuddy V1 ships a per-user NSIS installer for Windows. Build and create its
+QuotaBuddy v0.2 ships a per-user NSIS installer for Windows. Build and create its
 SHA-256 file locally:
 
 ```powershell
@@ -38,8 +43,8 @@ The distributable files are written to `release/` and are intentionally ignored
 by Git. Verify a downloaded installer before running it:
 
 ```powershell
-Get-FileHash .\release\QuotaBuddy_0.1.1_x64-setup.exe -Algorithm SHA256
-Get-Content .\release\QuotaBuddy_0.1.1_x64-setup.exe.sha256
+Get-FileHash .\release\QuotaBuddy_0.2.0_x64-setup.exe -Algorithm SHA256
+Get-Content .\release\QuotaBuddy_0.2.0_x64-setup.exe.sha256
 ```
 
 Do not publish a GitHub Release until the installer, checksum, and the gates

@@ -1,0 +1,11 @@
+{
+  "account": {
+    "type": "chatgpt",
+    "email": "private@example.test",
+    "planType": "plus",
+    "accountId": "account-secret-value",
+    "accessToken": "oauth-secret-value",
+    "claims": { "subject": "claim-secret-value" }
+  },
+  "requiresOpenaiAuth": true
+}

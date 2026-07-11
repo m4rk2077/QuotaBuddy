@@ -1,13 +1,53 @@
-use std::process::Command;
+use crate::{
+    child_process,
+    core::{DetectedClient, ProviderId},
+};
+use serde::{Deserialize, Serialize};
 
-use crate::core::{DetectedClient, ProviderId};
+const CLIENT_CANDIDATES: &[(ProviderId, &[&str])] = &[
+    (ProviderId::Codex, &["codex.cmd", "codex.exe", "codex"]),
+    (
+        ProviderId::ClaudeCode,
+        &["claude.cmd", "claude.exe", "claude"],
+    ),
+    (ProviderId::Cursor, &["cursor.cmd", "cursor.exe", "cursor"]),
+];
 
-const CLIENT_CANDIDATES: &[(ProviderId, &[&str])] =
-    &[(ProviderId::Codex, &["codex.cmd", "codex.exe", "codex"])];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UsageIntegration {
+    Native,
+    OptInBridge,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapability {
+    pub provider: ProviderId,
+    pub client_detected: bool,
+    pub usage_integration: UsageIntegration,
+}
 
 /// Returns only clients found on PATH. Missing clients are deliberately absent.
 pub fn detect_installed_clients() -> Vec<DetectedClient> {
     detect_with(command_exists)
+}
+
+pub fn provider_capabilities() -> Vec<ProviderCapability> {
+    let detected = detect_installed_clients();
+    [
+        (ProviderId::Codex, UsageIntegration::Native),
+        (ProviderId::ClaudeCode, UsageIntegration::OptInBridge),
+        (ProviderId::Cursor, UsageIntegration::Unavailable),
+    ]
+    .into_iter()
+    .map(|(provider, usage_integration)| ProviderCapability {
+        provider,
+        client_detected: detected.iter().any(|client| client.provider == provider),
+        usage_integration,
+    })
+    .collect()
 }
 
 pub fn detect_with<F>(exists: F) -> Vec<DetectedClient>
@@ -34,7 +74,7 @@ fn command_exists(executable: &str) -> bool {
     } else {
         "which"
     };
-    Command::new(lookup)
+    child_process::command(lookup)
         .arg(executable)
         .output()
         .map(|output| output.status.success())
@@ -51,6 +91,17 @@ mod tests {
 
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].provider, ProviderId::Codex);
+    }
+
+    #[test]
+    fn detects_each_supported_client_without_claiming_usage_access() {
+        let detected =
+            detect_with(|executable| ["codex.exe", "claude.cmd", "cursor"].contains(&executable));
+
+        assert_eq!(detected.len(), 3);
+        assert_eq!(detected[0].provider, ProviderId::Codex);
+        assert_eq!(detected[1].provider, ProviderId::ClaudeCode);
+        assert_eq!(detected[2].provider, ProviderId::Cursor);
     }
 
     #[test]
