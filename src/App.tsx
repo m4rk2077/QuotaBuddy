@@ -8,10 +8,12 @@ import { getMetricPresentation, getSnapshotDisplayState, selectOverviewMetrics, 
 import { createSingleFlightRefresh } from "./refresh-state";
 import { formatPercent } from "./history-format";
 import { HistoryPanel } from "./history-panel";
+import { deriveCodexLimitReached, formatResetCountdown, type CodexLimitReached } from "./limit-game";
+import { ResetRun } from "./reset-run";
 import { exportRedactedDiagnostics, getLocalSpendEstimate, getProviderCapabilities, getUsageSnapshots } from "./usage";
 import "./App.css";
 
-type View = "overview" | "history" | "settings";
+type View = "overview" | "history" | "settings" | "game";
 type Copy = typeof en;
 
 function App() {
@@ -33,6 +35,11 @@ function App() {
     preferenceSaveCoordinator.current = new MonitorPreferenceSaveCoordinator(defaultMonitorPreferences);
   }
   const text = useMemo(() => preferences.language === "ptBr" ? { ...en, ...ptBr } : en, [preferences.language]);
+  const resetRunPreview = useMemo<CodexLimitReached | null>(() => import.meta.env.DEV && import.meta.env.VITE_RESET_RUN_PREVIEW === "1" ? {
+    reached: [{ slot: "session", resetAt: new Date(Date.now() + 2 * 60 * 60 * 1_000).toISOString() }],
+    effectiveResetAt: new Date(Date.now() + 2 * 60 * 60 * 1_000).toISOString(),
+  } : null, []);
+  const limitReached = useMemo(() => resetRunPreview ?? deriveCodexLimitReached(snapshots.find((item) => item.provider === "codex")), [resetRunPreview, snapshots]);
   const loadFailedText = useRef(text.loadFailed);
   loadFailedText.current = text.loadFailed;
   const preferencesFailedText = useRef(text.preferencesFailed);
@@ -107,6 +114,10 @@ function App() {
     return () => window.removeEventListener("keydown", handleEscape);
   }, [view]);
 
+  useEffect(() => {
+    if (view === "game" && !limitReached) setView("overview");
+  }, [limitReached, view]);
+
   const updatePreferences = async (next: MonitorPreferences) => {
     const coordinator = preferenceSaveCoordinator.current;
     if (!coordinator) return;
@@ -139,9 +150,11 @@ function App() {
     }
   }, [text]);
 
+  const resolvedView: View = view === "game" && !limitReached ? "overview" : view;
+
   return (
     <main className="app-shell">
-      {view === "overview" ? (
+      {resolvedView === "overview" ? (
         <Overview
           snapshots={snapshots}
           loading={loading}
@@ -150,12 +163,17 @@ function App() {
           estimateLoading={estimateLoading}
           estimateError={estimateError}
           preferences={preferences}
+          limitReached={limitReached}
           text={text}
           onRefresh={() => void refresh()}
           onHistory={() => setView("history")}
           onSettings={() => setView("settings")}
+          onPlay={() => setView("game")}
+          onResetDue={refresh}
         />
-      ) : view === "settings" ? (
+      ) : resolvedView === "game" && limitReached ? (
+        <ResetRun limit={limitReached} language={preferences.language} onBack={() => setView("overview")} onResetDue={refresh} />
+      ) : resolvedView === "settings" ? (
         <SettingsPanel
           preferences={preferences}
           text={text}
@@ -174,7 +192,7 @@ function App() {
   );
 }
 
-function Overview({ snapshots, loading, loadError, estimate, estimateLoading, estimateError, preferences, text, onRefresh, onHistory, onSettings }: {
+function Overview({ snapshots, loading, loadError, estimate, estimateLoading, estimateError, preferences, limitReached, text, onRefresh, onHistory, onSettings, onPlay, onResetDue }: {
   snapshots: UsageSnapshot[];
   loading: boolean;
   loadError: string | null;
@@ -182,19 +200,24 @@ function Overview({ snapshots, loading, loadError, estimate, estimateLoading, es
   estimateLoading: boolean;
   estimateError: boolean;
   preferences: MonitorPreferences;
+  limitReached: CodexLimitReached | null;
   text: Copy;
   onRefresh: () => void;
   onHistory: () => void;
   onSettings: () => void;
+  onPlay: () => void;
+  onResetDue: () => void;
 }) {
   const snapshot = snapshots.find((item) => item.provider === "codex") ?? snapshots[0];
   const selected = snapshot ? selectOverviewMetrics(snapshot) : { session: null, weekly: null };
-  const status = getHeaderStatus(snapshot, loading, loadError, text);
+  const status = limitReached ? { label: text.cooldownStatus, tone: "warning" as const } : getHeaderStatus(snapshot, loading, loadError, text);
   const initialFailure = !loading && Boolean(loadError) && !snapshot;
 
   return <div className="overview">
     <PanelHeader status={status} />
-    {initialFailure ? <FailureState text={text} /> : shouldShowEmptyState(loading, snapshots) ? <EmptyState text={text} /> : (
+    {limitReached ? (
+      <CooldownState limit={limitReached} text={text} onPlay={onPlay} onResetDue={onResetDue} />
+    ) : initialFailure ? <FailureState text={text} /> : shouldShowEmptyState(loading, snapshots) ? <EmptyState text={text} /> : (
       <section className="metric-stack" aria-live="polite" aria-busy={loading}>
         <MetricCard slot="session" metric={selected.session} snapshot={snapshot} loading={loading} thresholds={preferences.alertThresholds} text={text} />
         <MetricCard slot="weekly" metric={selected.weekly} snapshot={snapshot} loading={loading} thresholds={preferences.alertThresholds} text={text} />
@@ -226,6 +249,44 @@ function FailureState({ text }: { text: Copy }) {
     <h2>{text.updateFailed}</h2>
     <p>{text.updateFailedDescription}</p>
   </section>;
+}
+
+function CooldownState({ limit, text, onPlay, onResetDue }: { limit: CodexLimitReached; text: Copy; onPlay: () => void; onResetDue: () => void }) {
+  const [now, setNow] = useState(Date.now());
+  const resetRefreshRequested = useRef(false);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const resetTime = new Date(limit.effectiveResetAt).getTime();
+    if (now < resetTime || resetRefreshRequested.current) return;
+    resetRefreshRequested.current = true;
+    onResetDue();
+  }, [limit.effectiveResetAt, now, onResetDue]);
+
+  return <section className="cooldown-state" aria-labelledby="cooldown-title">
+    <div className="cooldown-grid" aria-hidden="true" />
+    <div className="cooldown-orbit" aria-hidden="true"><BuddyPreview /></div>
+    <div className="cooldown-copy">
+      <span className="cooldown-kicker">{text.cooldownEyebrow}</span>
+      <h2 id="cooldown-title">{text.cooldownTitle}</h2>
+      <p>{text.cooldownDescription}</p>
+    </div>
+    <div className="cooldown-clock">
+      <span>{text.realUnlock}</span>
+      <strong>{formatResetCountdown(limit.effectiveResetAt, now)}</strong>
+    </div>
+    <div className="cooldown-tags">{limit.reached.map((item) => <span key={item.slot}>{item.slot === "session" ? text.sessionReached : text.weeklyReached}</span>)}</div>
+    <button className="reset-play-button" type="button" onClick={onPlay}><PlayIcon /><span>{text.playWhileWaiting}</span><ChevronRightIcon /></button>
+    <small className="cooldown-truth">{text.gameDisclaimer}</small>
+  </section>;
+}
+
+function BuddyPreview() {
+  return <span className="buddy-preview" aria-hidden="true"><span className="buddy-preview-antenna" /><span className="buddy-preview-eye left" /><span className="buddy-preview-eye right" /><span className="buddy-preview-mouth" /></span>;
 }
 
 function PanelHeader({ status }: { status: { label: string; tone: "healthy" | "warning" | "danger" | "muted" } }) {
@@ -432,9 +493,11 @@ const ClockIcon = () => <Icon><circle cx="12" cy="12" r="8" /><path d="M12 7v5l3
 const WalletIcon = () => <Icon><path d="M3 6.5h16a2 2 0 0 1 2 2v9H5a2 2 0 0 1-2-2v-9Zm0 0 13-2v2M16 12h5" /><circle cx="16" cy="12" r=".6" /></Icon>;
 const BackIcon = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;
 const ChartIcon = () => <Icon><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /></Icon>;
+const PlayIcon = () => <Icon><path d="m9 7 8 5-8 5Z" /></Icon>;
 const ChevronRightIcon = () => <Icon><path d="m9 18 6-6-6-6" /></Icon>;
 
 const en = {
+  cooldownStatus: "Codex limit reached", cooldownEyebrow: "LIMIT REACHED", cooldownTitle: "Codex is cooling down", cooldownDescription: "Your next window is on the way. Take Buddy to the RESET portal while you wait.", realUnlock: "REAL UNLOCK", sessionReached: "5h session at 0%", weeklyReached: "Weekly at 0%", playWhileWaiting: "Play while you wait", gameDisclaimer: "The game never changes your real Codex quota.",
   locale: "en-US", loadFailed: "Could not update usage", preferencesFailed: "Preferences unavailable", preferencesSaveFailed: "Could not save preferences",
   refresh: "Refresh", refreshing: "Updating…", updateFailed: "Update failed", updateFailedDescription: "QuotaBuddy could not read local usage. Try again from the refresh button.", failedWithCache: "Update failed · showing cached data", updatedNow: "Updated just now", updatedMinutes: "Updated {minutes} min ago", noClient: "Codex not detected", noClientDescription: "Open or sign in to Codex, then refresh. QuotaBuddy will keep checking locally.",
   session: "Session limit", weekly: "Weekly limit", remaining: "remaining", warningRemaining: "remaining · attention", criticalRemaining: "remaining · critical", unavailable: "Unavailable", stale: "Data may be out of date", staleShort: "remaining · stale", failedCachedShort: "remaining · update failed", reauthRequired: "Sign in to Codex again", reauthShort: "Sign in required",
@@ -443,6 +506,7 @@ const en = {
 };
 
 const ptBr: Partial<Copy> = {
+  cooldownStatus: "Limite Codex atingido", cooldownEyebrow: "LIMITE ATINGIDO", cooldownTitle: "Codex entrou em cooldown", cooldownDescription: "Sua próxima janela está chegando. Leve Buddy até o portal RESET enquanto espera.", realUnlock: "DESBLOQUEIO REAL", sessionReached: "sessão de 5h em 0%", weeklyReached: "semanal em 0%", playWhileWaiting: "Jogar enquanto espera", gameDisclaimer: "O jogo nunca altera sua quota real do Codex.",
   locale: "pt-BR", loadFailed: "Não foi possível atualizar o uso", preferencesFailed: "Preferências indisponíveis", preferencesSaveFailed: "Não foi possível salvar as preferências",
   refresh: "Atualizar", refreshing: "Atualizando…", updateFailed: "Falha na atualização", updateFailedDescription: "O QuotaBuddy não conseguiu ler o uso local. Tente novamente pelo botão de atualizar.", failedWithCache: "Falha ao atualizar · exibindo dados salvos", updatedNow: "Atualizado agora", updatedMinutes: "Atualizado há {minutes} min", noClient: "Codex não detectado", noClientDescription: "Abra ou entre no Codex e atualize. O QuotaBuddy continuará verificando localmente.",
   session: "Limite da sessão", weekly: "Limite semanal", remaining: "restante", warningRemaining: "restante · atenção", criticalRemaining: "restante · crítico", unavailable: "Indisponível", stale: "Dados podem estar desatualizados", staleShort: "restante · desatualizado", failedCachedShort: "restante · falha ao atualizar", reauthRequired: "Entre novamente no Codex", reauthShort: "Login necessário",
